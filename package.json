@@ -1,0 +1,26 @@
+{
+  "name": "plantuml",
+  "version": "1.0.0",
+  "main": "src/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "build": "vite build",
+    "start": "electron ."
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.3",
+    "concurrently": "^9.2.1",
+    "cross-env": "^7.0.3",
+    "electron": "^39.2.7",
+    "vite": "^7.3.0",
+    "vue": "^3.5.26",
+    "wait-on": "^9.0.3"
+  },
+  "dependencies": {
+    "monaco-editor": "^0.55.1"
+  }
+}
