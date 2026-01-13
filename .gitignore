@@ -1,0 +1,47 @@
+# ======================
+# Node.js & Build
+# ======================
+node_modules/
+dist/
+out/
+build/
+.release-info
+.env
+.env.local
+.env.*.local
+
+# ======================
+# Logs
+# ======================
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ======================
+# External Binaries (Do NOT commit)
+# ======================
+jre/
+JRE/
+temp/
+plantuml.jar
+*.exe
+*.dmg
+*.AppImage
+
+# ======================
+# IDE / OS
+# ======================
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# ======================
+# Temporary files
+# ======================
+*.tmp
+*.log
