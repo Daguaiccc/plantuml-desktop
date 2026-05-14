@@ -25,10 +25,16 @@
 </template>
 
 <script setup>
-import { reactive } from 'vue';
+import { reactive, onMounted, onUnmounted } from 'vue';
 
 defineProps({ show: Boolean });
-defineEmits(['close']);
+const emit = defineEmits(['close']);
+
+function onKeyDown(e) {
+  if (e.key === 'Escape') emit('close');
+}
+onMounted(() => document.addEventListener('keydown', onKeyDown));
+onUnmounted(() => document.removeEventListener('keydown', onKeyDown));
 
 const sections = reactive([
   {

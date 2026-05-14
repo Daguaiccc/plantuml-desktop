@@ -32,23 +32,26 @@
     </div>
 
     <!-- Tab bar -->
-    <div v-if="tabs.length >= 2" class="tab-bar">
-      <div
-        v-for="(tab, idx) in tabs" :key="tab.id"
-        class="tab-item"
-        :class="{ active: tab.id === activeTabId, 'drag-over': dragOverIndex === idx && dragTabIndex !== idx, dragging: dragTabIndex === idx }"
-        draggable="true"
-        @click="switchTab(tab.id, $event)"
-        @dragstart="onTabDragStart($event, idx)"
-        @dragover.prevent="onTabDragOver($event, idx)"
-        @dragenter.prevent
-        @dragleave="onTabDragLeave($event)"
-        @drop="onTabDrop($event, idx)"
-        @contextmenu.prevent="onTabContextMenu($event, tab.id)"
-      >
-        <span class="tab-label">{{ tab.fileName }}{{ tab.code !== tab.savedContent ? ' *' : '' }}</span>
-        <button class="tab-close-btn" @click.stop="requestCloseTab(tab.id)" title="关闭">&times;</button>
+    <div v-if="tabs.length >= 1" class="tab-bar">
+      <div class="tab-bar-inner">
+        <div
+          v-for="(tab, idx) in tabs" :key="tab.id"
+          class="tab-item"
+          :class="{ active: tab.id === activeTabId, 'drag-over': dragOverIndex === idx && dragTabIndex !== idx, dragging: dragTabIndex === idx }"
+          draggable="true"
+          @click="switchTab(tab.id, $event)"
+          @dragstart="onTabDragStart($event, idx)"
+          @dragover.prevent="onTabDragOver($event, idx)"
+          @dragenter.prevent
+          @dragleave="onTabDragLeave($event)"
+          @drop="onTabDrop($event, idx)"
+          @contextmenu.prevent="onTabContextMenu($event, tab.id)"
+        >
+          <span class="tab-label">{{ tab.fileName }}{{ tab.code !== tab.savedContent ? ' *' : '' }}</span>
+          <button class="tab-close-btn" @click.stop="requestCloseTab(tab.id)" title="关闭">&times;</button>
+        </div>
       </div>
+      <button class="tab-new-btn" @click="createNewDiagram" title="新建标签页">+</button>
     </div>
 
     <!-- Tab context menu -->
@@ -135,16 +138,8 @@
           <button @click="zoomIn" title="放大">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14" /></svg>
           </button>
-          <span class="zoom-sep"></span>
-          <button @click="zoomTo100" title="1:1 实际大小" class="zoom-pct-btn">1:1</button>
-          <button @click="fitToWidth" title="适应宽度">
+          <button @click="resetView" title="适应窗口">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
-          </button>
-          <button @click="resetView" title="重置视图">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M17 17C17 18.1046 16.1046 19 15 19C13.8954 19 13 18.1046 13 17C13 15.8954 13.8954 15 15 15C16.1046 15 17 15.8954 17 17Z" />
-              <path d="M15 5V13L9 11" />
-            </svg>
           </button>
         </div>
 
@@ -409,30 +404,6 @@ function resetView() {
   if (svg.value) fitToContainer();
   else { zoomLevel.value = 1; offsetX.value = 0; offsetY.value = 0; }
 }
-function zoomTo100() {
-  zoomLevel.value = 1;
-  if (svgWrapper.value && svg.value) {
-    const svgEl = svgWrapper.value.querySelector('svg');
-    if (svgEl) {
-      const cr = svgWrapper.value.getBoundingClientRect();
-      const sw = parseFloat(svgEl.getAttribute('width')) || 0;
-      offsetX.value = (cr.width - sw) / 2;
-      offsetY.value = (cr.height - sw) / 2;
-    }
-  }
-}
-function fitToWidth() {
-  if (!svgWrapper.value || !svg.value) return;
-  const svgEl = svgWrapper.value.querySelector('svg');
-  if (!svgEl) return;
-  const sw = parseFloat(svgEl.getAttribute('width')) || 0;
-  if (sw <= 0) return;
-  const cr = svgWrapper.value.getBoundingClientRect();
-  const scale = Math.min(cr.width / sw, MAX_ZOOM);
-  zoomLevel.value = scale;
-  offsetX.value = 0;
-  offsetY.value = (cr.height - (parseFloat(svgEl.getAttribute('height')) || 0) * scale) / 2;
-}
 function handleZoomInput(e) {
   let v = parseFloat(e.target.value);
   if (isNaN(v)) v = 100;
@@ -563,6 +534,11 @@ function onTabDrop(e, idx) {
 }
 
 // ========== Tab Operations ==========
+function findTabByPath(filePath) {
+  if (!filePath) return null;
+  return tabs.value.find(t => t.filePath === filePath) || null;
+}
+
 function switchTab(tabId, event) {
   if (event?.shiftKey) {
     requestCloseTab(tabId);
@@ -611,6 +587,8 @@ async function openExistingDiagram() {
   try {
     const result = await window.api.file.openFile();
     if (result.canceled) return;
+    const existing = findTabByPath(result.filePath);
+    if (existing) { switchTab(existing.id); return; }
     // Replace empty single tab or create new
     if (tabs.value.length === 1 && !activeTab.value.filePath && activeTab.value.code === INITIAL_CODE && activeTab.value.savedContent === INITIAL_CODE) {
       const tab = activeTab.value;
@@ -627,6 +605,8 @@ async function openExistingDiagram() {
 
 async function openRecentFile(filePath) {
   if (!window.api) return;
+  const existing = findTabByPath(filePath);
+  if (existing) { switchTab(existing.id); return; }
   try {
     const result = await window.api.file.readFile(filePath);
     if (result.success) {
@@ -687,6 +667,8 @@ async function saveAs() {
 // ========== Open path from OS ==========
 function handleOpenPath(filePath, content) {
   suppressWelcome.value = false;
+  const existing = findTabByPath(filePath);
+  if (existing) { switchTab(existing.id); return; }
   // Replace the empty initial tab if it's untouched
   if (tabs.value.length === 1 && !activeTab.value.filePath && activeTab.value.code === INITIAL_CODE && activeTab.value.savedContent === INITIAL_CODE) {
     const tab = activeTab.value;
