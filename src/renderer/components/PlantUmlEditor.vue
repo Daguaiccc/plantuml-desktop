@@ -1,4 +1,3 @@
-
 <template>
   <div ref="container" class="monaco-editor-container"></div>
 </template>
@@ -10,35 +9,27 @@ import * as monaco from 'monaco-editor/esm/vs/editor/editor.main.js';
 const props = defineProps({
   modelValue: { type: String, default: '' }
 });
-const emit = defineEmits(['update:modelValue']);
+const emit = defineEmits(['update:modelValue', 'cursorChange']);
 
 const container = ref(null);
 let editor = null;
+let decorations = [];
 
 onMounted(async () => {
-  await nextTick(); // 👈 关键：确保 DOM 已更新，ref 已绑定
+  await nextTick();
 
   if (!container.value) {
     console.error('[Monaco] Failed to get container DOM element');
     return;
   }
 
-
-  // 注册 PlantUML 语言
   monaco.languages.register({ id: 'plantuml' });
   monaco.languages.setMonarchTokensProvider('plantuml', {
     tokenizer: {
       root: [
-        // 👇 安全：只匹配普通关键字（无 @ 符号）
-        [/\b(activate|deactivate|participant|actor|usecase|class|interface|package|note|title|skinparam|state|datebase|[*])\b/, 'keyword'],
-
-        // 注释（以 ' 开头的行）
+        [/\b(activate|deactivate|participant|actor|usecase|class|interface|package|note|title|skinparam|state|database|[*])\b/, 'keyword'],
         [/'.*$/, 'comment'],
-
-        // 字符串（双引号）
         [/"/, 'string', '@string'],
-
-        // 其他标识符（类名、用例名等）
         [/[a-zA-Z][\w]*/, 'identifier']
       ],
       string: [
@@ -49,11 +40,8 @@ onMounted(async () => {
     }
   });
 
-// create 时
-language: 'plantuml'
-
   editor = monaco.editor.create(container.value, {
-    value: props.modelValue || ``,
+    value: props.modelValue || '',
     language: 'plantuml',
     theme: 'vs',
     automaticLayout: true,
@@ -68,6 +56,13 @@ language: 'plantuml'
   editor.onDidChangeModelContent(() => {
     emit('update:modelValue', editor.getValue());
   });
+
+  editor.onDidChangeCursorPosition((e) => {
+    emit('cursorChange', {
+      line: e.position.lineNumber,
+      column: e.position.column
+    });
+  });
 });
 
 watch(() => props.modelValue, (newVal) => {
@@ -76,10 +71,33 @@ watch(() => props.modelValue, (newVal) => {
   }
 });
 
-onUnmounted(() => {
-  if (editor) {
-    editor.dispose();
+function highlightErrorLine(lineNumber) {
+  if (!editor) return;
+  clearErrorHighlights();
+  if (lineNumber > 0) {
+    decorations = editor.deltaDecorations([], [{
+      range: new monaco.Range(lineNumber, 1, lineNumber, 1),
+      options: {
+        isWholeLine: true,
+        className: 'error-line-highlight',
+        overviewRuler: { color: '#E8734A', position: monaco.editor.OverviewRulerLane.Full }
+      }
+    }]);
+    editor.revealLineInCenter(lineNumber);
   }
+}
+
+function clearErrorHighlights() {
+  if (editor && decorations.length > 0) {
+    editor.deltaDecorations(decorations, []);
+    decorations = [];
+  }
+}
+
+defineExpose({ highlightErrorLine, clearErrorHighlights });
+
+onUnmounted(() => {
+  if (editor) { editor.dispose(); }
 });
 </script>
 
@@ -87,7 +105,9 @@ onUnmounted(() => {
 .monaco-editor-container {
   width: 100%;
   height: 100%;
-  border: 1px solid #ccc;
-  border-radius: 4px;
+}
+
+:deep(.error-line-highlight) {
+  background-color: rgba(232, 115, 74, 0.15);
 }
 </style>

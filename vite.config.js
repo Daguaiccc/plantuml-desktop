@@ -1,4 +1,4 @@
-// vite.config.js（修改后）
+// vite.config.js
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 import path from 'path';
@@ -6,6 +6,7 @@ import path from 'path';
 export default defineConfig({
   plugins: [vue()],
 
+  base: './',
   root: 'src/renderer',
 
   build: {
@@ -17,15 +18,18 @@ export default defineConfig({
         preload: path.resolve(__dirname, 'src/preload.js')
       },
       output: {
-        entryFileNames: '[name].js' // → dist/preload.js
-      }
-      // ✂️ 删除 external 行！
+        entryFileNames: '[name].js'
+      },
+      external: ['electron']
     }
   },
 
   server: {
     port: 5173,
-    strictPort: true
+    strictPort: true,
+    fs: {
+      allow: ['..', '../..']
+    }
   },
 
   define: {

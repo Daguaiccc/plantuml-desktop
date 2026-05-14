@@ -5,22 +5,82 @@
   "scripts": {
     "dev": "concurrently -k \"vite\" \"wait-on http://localhost:5173 && electron .\"",
     "build": "vite build",
+    "build:win": "vite build && electron-builder --win --x64",
     "start": "electron ."
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
+  "build": {
+    "appId": "com.plantuml.desktop",
+    "productName": "PlantUML Editor",
+    "copyright": "Copyright 2026",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "src/main.js",
+      "assets/logo.png",
+      "assets/icon.ico"
+    ],
+    "extraResources": [
+      {
+        "from": "jre",
+        "to": "jre"
+      },
+      {
+        "from": "bin",
+        "to": "bin",
+        "filter": ["plantuml.jar"]
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "fileAssociations": [{
+      "ext": "puml",
+      "name": "PlantUML Diagram",
+      "description": "PlantUML 图表文件",
+      "role": "Editor",
+      "icon": "build/icon.ico"
+    }],
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "language": "2052",
+      "unicode": true,
+      "shortcutName": "PlantUML Editor",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.3",
     "concurrently": "^9.2.1",
     "cross-env": "^7.0.3",
     "electron": "^39.2.7",
+    "electron-builder": "^26.8.1",
+    "sharp": "^0.34.5",
+    "to-ico": "^1.1.5",
     "vite": "^7.3.0",
     "vue": "^3.5.26",
     "wait-on": "^9.0.3"
   },
   "dependencies": {
+    "lodash": "^4.17.21",
     "monaco-editor": "^0.55.1"
   }
 }

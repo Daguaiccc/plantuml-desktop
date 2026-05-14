@@ -1,87 +1,145 @@
 <template>
-  <div class="app-container">
-    <!-- 标题栏 -->
+  <div
+    class="app-container"
+    @dragover.prevent="onDragOver"
+    @dragleave="onDragLeave"
+    @drop.prevent="onDrop"
+    @mousedown="onClickOutside"
+  >
+    <!-- Drag overlay -->
+    <div v-if="isDragging" class="drag-overlay">释放文件以打开</div>
+
+    <!-- Title bar -->
     <div class="title-bar">
       <div class="title-bar-left">
         <img :src="logo" alt="Logo" class="app-logo" />
-        <span class="file-name">{{ fileName }}{{ isSaved ? '' : '*' }}</span>
+        <span class="file-name">{{ displayFileName }}{{ isModified ? ' *' : '' }}</span>
       </div>
       <div class="title-bar-right">
+        <button @click="showCheatsheet = true" class="toolbar-btn icon-btn" title="语法速查">?</button>
         <button @click="openFile" class="toolbar-btn" :disabled="isBusy">打开</button>
         <button @click="save" class="toolbar-btn" :disabled="isBusy">保存</button>
         <button @click="saveAs" class="toolbar-btn" :disabled="isBusy">另存为</button>
-        <button @click="exportAsSvg" class="toolbar-btn" :disabled="!canExportOrCopy || isBusy">
-          {{ isExporting ? '导出中...' : '导出 SVG' }}
-        </button>
-      </div>
-    </div>
-
-    <!-- 欢迎弹窗 -->
-    <div v-if="showWelcomeModal" class="welcome-modal-overlay">
-      <div class="welcome-modal">
-        <div class="modal-content">
-          <h3>欢迎使用 PlantUML 编辑器</h3>
-          <button @click="createNewDiagram" class="modal-btn-primary">创建新绘图</button>
-          <button @click="openExistingDiagram" class="modal-btn-secondary">打开现有绘图</button>
+        <div class="export-dropdown-wrapper">
+          <button @click.stop="toggleExportMenu" class="toolbar-btn" :disabled="!canExport || isBusy">导出 ▾</button>
+          <div v-if="showExportMenu" class="export-dropdown">
+            <button @click.stop="doExport('svg')">导出 SVG</button>
+            <button @click.stop="doExport('png')">导出 PNG</button>
+            <button @click.stop="doExport('pdf')">导出 PDF</button>
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- 主体内容 -->
-    <div class="main-layout">
-      <!-- 左侧：编辑器 -->
-      <div class="editor-panel">
+    <!-- Tab bar -->
+    <div v-if="tabs.length >= 2" class="tab-bar">
+      <div
+        v-for="(tab, idx) in tabs" :key="tab.id"
+        class="tab-item"
+        :class="{ active: tab.id === activeTabId, 'drag-over': dragOverIndex === idx && dragTabIndex !== idx, dragging: dragTabIndex === idx }"
+        draggable="true"
+        @click="switchTab(tab.id, $event)"
+        @dragstart="onTabDragStart($event, idx)"
+        @dragover.prevent="onTabDragOver($event, idx)"
+        @dragenter.prevent
+        @dragleave="onTabDragLeave($event)"
+        @drop="onTabDrop($event, idx)"
+        @contextmenu.prevent="onTabContextMenu($event, tab.id)"
+      >
+        <span class="tab-label">{{ tab.fileName }}{{ tab.code !== tab.savedContent ? ' *' : '' }}</span>
+        <button class="tab-close-btn" @click.stop="requestCloseTab(tab.id)" title="关闭">&times;</button>
+      </div>
+    </div>
+
+    <!-- Tab context menu -->
+    <div v-if="tabMenu.show" class="context-menu" :style="{ left: tabMenu.x + 'px', top: tabMenu.y + 'px' }" @mousedown.stop>
+      <button @click="contextCloseTab">关闭</button>
+      <button @click="contextCloseOthers">关闭其他</button>
+      <button @click="contextCloseAll">关闭所有</button>
+      <button v-if="tabMenu.filePath" @click="contextCopyPath">复制路径</button>
+    </div>
+
+    <!-- Welcome modal -->
+    <div v-if="showWelcome" class="welcome-modal-overlay">
+      <div class="welcome-modal">
+        <h3>欢迎使用 PlantUML 编辑器</h3>
+        <button @click="createNewDiagram" class="modal-btn-primary">创建新绘图</button>
+        <button @click="openExistingDiagram" class="modal-btn-secondary">打开现有绘图</button>
+        <div v-if="recentFiles.length > 0" class="recent-files-section">
+          <div class="recent-files-title">最近打开的文件</div>
+          <div v-for="rf in recentFiles" :key="rf.path" class="recent-file-item" @click="openRecentFile(rf.path)">
+            <span class="recent-file-name">{{ rf.name }}</span>
+            <span class="recent-file-path">{{ rf.path }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Unsaved changes dialog -->
+    <div v-if="showUnsavedDialog" class="welcome-modal-overlay">
+      <div class="welcome-modal">
+        <h3>{{ unsavedDialogTitle }}</h3>
+        <p class="unsaved-message">{{ unsavedDialogMessage }}</p>
+        <button @click="unsavedSave" class="modal-btn-primary">保存</button>
+        <button @click="unsavedDiscard" class="modal-btn-secondary">不保存</button>
+        <button @click="unsavedCancel" class="modal-btn-secondary">取消</button>
+      </div>
+    </div>
+
+    <!-- Syntax cheatsheet -->
+    <SyntaxCheatsheet :show="showCheatsheet" @close="showCheatsheet = false" />
+
+    <!-- Main layout -->
+    <div v-if="tabs.length > 0" class="main-layout" ref="mainLayout">
+      <!-- Left: Editor -->
+      <div class="editor-panel" :style="{ width: `calc(${splitRatio * 100}% - 8px)` }">
         <div class="editor-toolbar">
           <div class="toolbar-group">
             <span class="label">示例</span>
             <select v-model="selectedExample" @change="loadExample" class="select-control">
               <option value="">请选择</option>
-              <option
-                v-for="opt in exampleOptions"
-                :key="opt.value"
-                :value="opt.value"
-              >
-                {{ opt.label }}
-              </option>
+              <option v-for="opt in exampleOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+            </select>
+          </div>
+          <div class="toolbar-group">
+            <span class="label">主题</span>
+            <select v-model="selectedTheme" @change="applyTheme" class="select-control">
+              <option v-for="t in themeOptions" :key="t.value" :value="t.value">{{ t.label }}</option>
             </select>
           </div>
         </div>
         <div class="editor-wrapper">
-          <div class="editor-header">
-            <span class="editor-header-text">plantuml</span>
-          </div>
-          <PlantUmlEditor v-model="code" />
+          <div class="editor-header"><span class="editor-header-text">plantuml</span></div>
+          <PlantUmlEditor
+            ref="editorRef"
+            v-model="editorCode"
+            @cursorChange="onCursorChange"
+          />
         </div>
       </div>
 
-      <!-- 右侧：SVG 预览 -->
-      <div class="preview-panel">
+      <!-- Splitter -->
+      <div class="splitter" :class="{ active: isSplitting }" @mousedown="startSplit"></div>
+
+      <!-- Right: Preview -->
+      <div class="preview-panel" :style="{ width: `calc(${(1 - splitRatio) * 100}% - 8px)` }">
         <div class="preview-controls">
           <button @click="zoomOut" title="缩小">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M5 12H19" />
-            </svg>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12H19" /></svg>
           </button>
-
           <div class="zoom-input-wrapper">
-            <input
-              type="number"
-              :value="Math.round(zoomLevel * 100)"
-              @change="handleZoomInput"
-              min="10"
-              max="300"
-              step="10"
-              class="zoom-input"
-            />
+            <input type="number" :value="Math.round(zoomLevel * 100)" @change="handleZoomInput"
+              min="10" max="300" step="10" class="zoom-input" />
             <span>%</span>
           </div>
-
           <button @click="zoomIn" title="放大">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14" /></svg>
           </button>
-
+          <span class="zoom-sep"></span>
+          <button @click="zoomTo100" title="1:1 实际大小" class="zoom-pct-btn">1:1</button>
+          <button @click="fitToWidth" title="适应宽度">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16" /></svg>
+          </button>
           <button @click="resetView" title="重置视图">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M17 17C17 18.1046 16.1046 19 15 19C13.8954 19 13 18.1046 13 17C13 15.8954 13.8954 15 15 15C16.1046 15 17 15.8954 17 17Z" />
@@ -90,22 +148,25 @@
           </button>
         </div>
 
-        <div
-          ref="svgWrapper"
-          class="svg-wrapper"
+        <div ref="svgWrapper" class="svg-wrapper"
           @mousedown="startDrag"
           @wheel.prevent="handleWheelZoom"
         >
-          <div
-            v-if="svg"
-            class="svg-content"
-            :style="{
-              transform: `translate(${offsetX}px, ${offsetY}px) scale(${zoomLevel})`,
-              transformOrigin: '0 0'
-            }"
+          <div v-if="svg" class="svg-content"
+            :style="{ transform: `translate(${offsetX}px, ${offsetY}px) scale(${zoomLevel})`, transformOrigin: '0 0' }"
             v-html="svg"
           ></div>
           <div v-else class="preview-placeholder">图表预览将显示在这里</div>
+        </div>
+
+        <div v-if="error" class="error-msg">{{ error }}</div>
+
+        <div class="status-bar">
+          <span v-if="svgSize">{{ svgSize.width }} &times; {{ svgSize.height }} px</span>
+          <span v-else></span>
+          <span v-if="renderTime !== null">{{ renderTime }}ms</span>
+          <span v-else></span>
+          <span>行 {{ cursorLine }}, 列 {{ cursorColumn }}</span>
         </div>
       </div>
     </div>
@@ -116,395 +177,760 @@
 import { ref, watch, nextTick, onMounted, onUnmounted, computed } from 'vue';
 import _debounce from 'lodash/debounce';
 import PlantUmlEditor from './components/PlantUmlEditor.vue';
-import logo from '../assets/logo.svg';
+import SyntaxCheatsheet from './components/SyntaxCheatsheet.vue';
+import logo from '../assets/logo-app.png';
 import { PLANTUML_EXAMPLES, EXAMPLE_OPTIONS } from './examples/plantumlExamples.js';
 
-// ========== 常量 ==========
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 3.0;
-const INITIAL_CODE = '@startuml\n@enduml'; //统一命名
+const INITIAL_CODE = '@startuml\n@enduml';
 
-// ========== 状态 ==========
-const code = ref(INITIAL_CODE); // 初始化为模板
+const PLANTUML_THEMES = [
+  { value: '', label: '无主题' },
+  { value: 'blueprint', label: 'Blueprint' },
+  { value: 'cerulean', label: 'Cerulean' },
+  { value: 'crt-amber', label: 'CRT Amber' },
+  { value: 'crt-green', label: 'CRT Green' },
+  { value: 'hacker', label: 'Hacker' },
+  { value: 'materia', label: 'Materia' },
+  { value: 'mimeograph', label: 'Mimeograph' },
+  { value: 'plain', label: 'Plain' },
+  { value: 'sketchy-outline', label: 'Sketchy' },
+  { value: 'spacelab', label: 'Spacelab' },
+  { value: 'united', label: 'United' }
+];
+
+// ========== Tab System ==========
+let nextTabId = 1;
+const tabs = ref([]);
+const activeTabId = ref(null);
+
+function createTab(code, fileName, filePath) {
+  const id = String(nextTabId++);
+  const tab = { id, fileName: fileName || '未命名绘图.puml', filePath: filePath || null, code: code || INITIAL_CODE, savedContent: code || INITIAL_CODE };
+  tabs.value.push(tab);
+  activeTabId.value = id;
+  return tab;
+}
+
+const activeTab = computed(() => tabs.value.find(t => t.id === activeTabId.value));
+const isModified = computed(() => { const t = activeTab.value; return t ? t.code !== t.savedContent : false; });
+const displayFileName = computed(() => activeTab.value ? activeTab.value.fileName : '');
+
+// Two-way binding with editor
+const editorCode = computed({
+  get: () => activeTab.value ? activeTab.value.code : '',
+  set: (val) => { if (activeTab.value) activeTab.value.code = val; }
+});
+
+const selectedExample = ref('');
+const exampleOptions = EXAMPLE_OPTIONS;
+const selectedTheme = ref('');
+const themeOptions = PLANTUML_THEMES;
+
+// Welcome modal — suppressed when a file is pending via IPC
+const suppressWelcome = ref(false);
+const showWelcome = computed(() => !suppressWelcome.value && tabs.value.length === 0);
+
+// Recent files
+const recentFiles = ref([]);
+
+// Syntax cheatsheet
+const showCheatsheet = ref(false);
+
+// Export dropdown
+const showExportMenu = ref(false);
+function toggleExportMenu() { showExportMenu.value = !showExportMenu.value; }
+function onClickOutside(e) {
+  if (!e.target.closest('.export-dropdown-wrapper')) showExportMenu.value = false;
+  if (!e.target.closest('.context-menu')) closeContextMenu();
+}
+
+// Unsaved dialog
+const showUnsavedDialog = ref(false);
+const unsavedDialogMode = ref('tab'); // 'tab' | 'app'
+const pendingCloseTabId = ref(null);
+const sequentialCloseMode = ref(false);
+const sequentialCloseQueue = ref([]);
+const sequentialCloseTab = computed(() => {
+  if (!sequentialCloseMode.value || sequentialCloseQueue.value.length === 0) return null;
+  return tabs.value.find(t => t.id === sequentialCloseQueue.value[0]);
+});
+const unsavedDialogTitle = computed(() => '未保存的更改');
+const unsavedDialogMessage = computed(() => {
+  if (sequentialCloseMode.value) {
+    const tab = sequentialCloseTab.value;
+    return tab ? `是否保存对 "${tab.fileName}" 的更改？` : '';
+  }
+  const tab = tabs.value.find(t => t.id === pendingCloseTabId.value);
+  return tab ? `是否保存对 "${tab.fileName}" 的更改？` : '';
+});
+
+// ========== SVG / Zoom / Pan State ==========
 const svg = ref('');
-const loading = ref(false);
 const error = ref('');
-
+const editorRef = ref(null);
 const zoomLevel = ref(1);
 const offsetX = ref(0);
 const offsetY = ref(0);
 const svgWrapper = ref(null);
 
-let isDragging = false;
-let dragStartX = 0;
-let dragStartY = 0;
+let isPanning = false;
+let panStartX = 0;
+let panStartY = 0;
 
-const showWelcomeModal = ref(true);
-const hasShownWelcome = ref(false);
+// Splitter
+const splitRatio = ref(0.5);
+const isSplitting = ref(false);
+const mainLayout = ref(null);
+let splitStartX = 0;
+let splitStartRatio = 0.5;
 
-const fileName = ref('未命名绘图.puml');
-const currentFilePath = ref(null);
+// Drag & drop
+const isDragging = ref(false);
 
-const selectedExample = ref('');
-const exampleOptions = EXAMPLE_OPTIONS;
+// Cursor
+const cursorLine = ref(1);
+const cursorColumn = ref(1);
 
-// 👇 核心：保存快照
-const savedContent = ref(INITIAL_CODE);
+// Status bar
+const svgSize = ref(null);
+const renderTime = ref(null);
 
-// 👇 新增状态
+// Export busy
 const isExporting = ref(false);
-const isCopying = ref(false);
-const isBusy = computed(() => isExporting.value || isCopying.value);
+const isExportingPng = ref(false);
+const isExportingPdf = ref(false);
+const isBusy = computed(() => isExporting.value || isExportingPng.value || isExportingPdf.value);
+const canExport = computed(() => (activeTab.value?.code || '').trim().length > 0);
 
-// ✅ 正确的 isSaved：基于快照比较
-const isContentModified = computed(() => code.value !== savedContent.value);
-const isSaved = computed(() => !isContentModified.value);
-
-// =================== 渲染逻辑 ===================
+// ========== Render ==========
 const render = async () => {
   error.value = '';
-  loading.value = true;
+  const startTime = performance.now();
   try {
-    const trimmed = code.value.trim();
+    const code = activeTab.value?.code || '';
+    const trimmed = code.trim();
     if (!trimmed.includes('@startuml') || !trimmed.includes('@enduml')) {
       error.value = 'PlantUML 代码必须包含 @startuml 和 @enduml';
+      renderTime.value = null;
       return;
     }
-    const result = await window.api.plantuml.render(code.value);
-    svg.value = result;
+    const result = await window.api.plantuml.render(code);
+    svg.value = result.svg;
+    renderTime.value = Math.round(performance.now() - startTime);
+    if (result.errorLine) {
+      error.value = result.errorMessage || '语法错误';
+      editorRef.value?.highlightErrorLine(result.errorLine);
+    } else {
+      error.value = '';
+      editorRef.value?.clearErrorHighlights();
+    }
   } catch (err) {
-    console.error('渲染错误:', err);
     error.value = '渲染失败: ' + (err.message || String(err));
-  } finally {
-    loading.value = false;
+    renderTime.value = null;
   }
 };
 
 const debouncedRender = _debounce(render, 500);
-watch(code, debouncedRender, { immediate: true });
+watch(editorCode, debouncedRender, { immediate: true });
 
-// 自动适配容器大小
-const fitToContainer = () => {
-  if (!svg.value || !svgWrapper.value) return;
-
-  const container = svgWrapper.value;
-  const svgEl = container.querySelector('svg');
-  if (!svgEl) return;
-
-  const svgWidth = parseFloat(svgEl.getAttribute('width')) || 0;
-  const svgHeight = parseFloat(svgEl.getAttribute('height')) || 0;
-
-  if (svgWidth <= 0 || svgHeight <= 0) return;
-
-  const containerRect = container.getBoundingClientRect();
-  const containerWidth = containerRect.width;
-  const containerHeight = containerRect.height;
-
-  const scaleX = containerWidth / svgWidth;
-  const scaleY = containerHeight / svgHeight;
-  let scale = Math.min(scaleX, scaleY);
-  scale = Math.min(scale, MAX_ZOOM);
-
-  const contentWidth = svgWidth * scale;
-  const contentHeight = svgHeight * scale;
-  const offsetXCentered = (containerWidth - contentWidth) / 2;
-  const offsetYCentered = (containerHeight - contentHeight) / 2;
-
-  zoomLevel.value = scale;
-  offsetX.value = offsetXCentered;
-  offsetY.value = offsetYCentered;
-};
+const debouncedSyncTheme = _debounce(syncThemeFromCode, 300);
+watch(editorCode, debouncedSyncTheme);
 
 watch(svg, () => {
   nextTick(() => {
     fitToContainer();
+    if (svgWrapper.value) {
+      const svgEl = svgWrapper.value.querySelector('svg');
+      if (svgEl) {
+        const w = parseFloat(svgEl.getAttribute('width')) || 0;
+        const h = parseFloat(svgEl.getAttribute('height')) || 0;
+        svgSize.value = w > 0 ? { width: Math.round(w), height: Math.round(h) } : null;
+      } else { svgSize.value = null; }
+    }
   });
 });
+
+const fitToContainer = () => {
+  if (!svg.value || !svgWrapper.value) return;
+  const container = svgWrapper.value;
+  const svgEl = container.querySelector('svg');
+  if (!svgEl) return;
+  const sw = parseFloat(svgEl.getAttribute('width')) || 0;
+  const sh = parseFloat(svgEl.getAttribute('height')) || 0;
+  if (sw <= 0 || sh <= 0) return;
+  const cr = container.getBoundingClientRect();
+  const scale = Math.min(cr.width / sw, cr.height / sh, MAX_ZOOM);
+  zoomLevel.value = scale;
+  offsetX.value = (cr.width - sw * scale) / 2;
+  offsetY.value = (cr.height - sh * scale) / 2;
+};
 
 onMounted(() => {
-  const handleResize = _debounce(() => {
-    if (svg.value) fitToContainer();
-  }, 200);
-
-  window.addEventListener('resize', handleResize);
-
-  onUnmounted(() => {
-    window.removeEventListener('resize', handleResize);
-  });
+  const hr = _debounce(() => { if (svg.value) fitToContainer(); }, 200);
+  window.addEventListener('resize', hr);
+  onUnmounted(() => { window.removeEventListener('resize', hr); });
 });
 
-// =================== 缩放与拖拽逻辑 ===================
-function applyZoom(factor, clientX, clientY) {
-  const newZoom = Math.min(Math.max(zoomLevel.value * factor, MIN_ZOOM), MAX_ZOOM);
-  if (Math.abs(newZoom - zoomLevel.value) < 0.001) return;
-
-  if (clientX !== undefined && clientY !== undefined && svgWrapper.value) {
-    const rect = svgWrapper.value.getBoundingClientRect();
-    const mouseX = clientX - rect.left;
-    const mouseY = clientY - rect.top;
-
-    const beforeX = (mouseX - offsetX.value) / zoomLevel.value;
-    const beforeY = (mouseY - offsetY.value) / zoomLevel.value;
-
-    const afterX = beforeX * newZoom;
-    const afterY = beforeY * newZoom;
-
-    offsetX.value = mouseX - afterX;
-    offsetY.value = mouseY - afterY;
+// ========== Zoom & Pan ==========
+function applyZoom(factor, cx, cy) {
+  const nz = Math.min(Math.max(zoomLevel.value * factor, MIN_ZOOM), MAX_ZOOM);
+  if (Math.abs(nz - zoomLevel.value) < 0.001) return;
+  if (cx !== undefined && cy !== undefined && svgWrapper.value) {
+    const r = svgWrapper.value.getBoundingClientRect();
+    const mx = cx - r.left, my = cy - r.top;
+    const bx = (mx - offsetX.value) / zoomLevel.value, by = (my - offsetY.value) / zoomLevel.value;
+    offsetX.value = mx - bx * nz;
+    offsetY.value = my - by * nz;
   }
-
-  zoomLevel.value = newZoom;
+  zoomLevel.value = nz;
 }
-
 function zoomIn() { applyZoom(1.2); }
 function zoomOut() { applyZoom(1 / 1.2); }
-function handleWheelZoom(e) {
-  const delta = e.deltaY > 0 ? 0.9 : 1.1;
-  applyZoom(delta, e.clientX, e.clientY);
-}
-
+function handleWheelZoom(e) { applyZoom(e.deltaY > 0 ? 0.9 : 1.1, e.clientX, e.clientY); }
 function startDrag(e) {
   if (e.button !== 0) return;
-  isDragging = true;
-  dragStartX = e.clientX - offsetX.value;
-  dragStartY = e.clientY - offsetY.value;
+  isPanning = true;
+  panStartX = e.clientX - offsetX.value;
+  panStartY = e.clientY - offsetY.value;
   if (svgWrapper.value) svgWrapper.value.style.cursor = 'grabbing';
   e.preventDefault();
 }
-
 function onDragMove(e) {
-  if (!isDragging) return;
-  offsetX.value = e.clientX - dragStartX;
-  offsetY.value = e.clientY - dragStartY;
+  if (!isPanning) return;
+  offsetX.value = e.clientX - panStartX;
+  offsetY.value = e.clientY - panStartY;
 }
-
-function stopDrag() {
-  isDragging = false;
-  if (svgWrapper.value) svgWrapper.value.style.cursor = 'grab';
-}
-
+function stopDrag() { isPanning = false; if (svgWrapper.value) svgWrapper.value.style.cursor = 'grab'; }
 document.addEventListener('mousemove', onDragMove);
 document.addEventListener('mouseup', stopDrag);
-
 function resetView() {
-  if (svg.value) {
-    fitToContainer();
-  } else {
-    zoomLevel.value = 1;
-    offsetX.value = 0;
-    offsetY.value = 0;
+  if (svg.value) fitToContainer();
+  else { zoomLevel.value = 1; offsetX.value = 0; offsetY.value = 0; }
+}
+function zoomTo100() {
+  zoomLevel.value = 1;
+  if (svgWrapper.value && svg.value) {
+    const svgEl = svgWrapper.value.querySelector('svg');
+    if (svgEl) {
+      const cr = svgWrapper.value.getBoundingClientRect();
+      const sw = parseFloat(svgEl.getAttribute('width')) || 0;
+      offsetX.value = (cr.width - sw) / 2;
+      offsetY.value = (cr.height - sw) / 2;
+    }
   }
 }
-
+function fitToWidth() {
+  if (!svgWrapper.value || !svg.value) return;
+  const svgEl = svgWrapper.value.querySelector('svg');
+  if (!svgEl) return;
+  const sw = parseFloat(svgEl.getAttribute('width')) || 0;
+  if (sw <= 0) return;
+  const cr = svgWrapper.value.getBoundingClientRect();
+  const scale = Math.min(cr.width / sw, MAX_ZOOM);
+  zoomLevel.value = scale;
+  offsetX.value = 0;
+  offsetY.value = (cr.height - (parseFloat(svgEl.getAttribute('height')) || 0) * scale) / 2;
+}
 function handleZoomInput(e) {
-  let value = parseFloat(e.target.value);
-  if (isNaN(value)) value = 100;
-  value = Math.min(Math.max(value, 10), 300);
-  const newZoom = value / 100;
-
-  const container = svgWrapper.value;
-  if (container && svg.value) {
-    const rect = container.getBoundingClientRect();
-    const centerX = rect.width / 2;
-    const centerY = rect.height / 2;
-
-    const beforeX = (centerX - offsetX.value) / zoomLevel.value;
-    const beforeY = (centerY - offsetY.value) / zoomLevel.value;
-
-    const afterX = beforeX * newZoom;
-    const afterY = beforeY * newZoom;
-
-    offsetX.value = centerX - afterX;
-    offsetY.value = centerY - afterY;
+  let v = parseFloat(e.target.value);
+  if (isNaN(v)) v = 100;
+  v = Math.min(Math.max(v, 10), 300);
+  const nz = v / 100;
+  const c = svgWrapper.value;
+  if (c && svg.value) {
+    const r = c.getBoundingClientRect();
+    const cx = r.width / 2, cy = r.height / 2;
+    const bx = (cx - offsetX.value) / zoomLevel.value, by = (cy - offsetY.value) / zoomLevel.value;
+    offsetX.value = cx - bx * nz;
+    offsetY.value = cy - by * nz;
   }
-
-  zoomLevel.value = newZoom;
+  zoomLevel.value = nz;
 }
 
-// =================== 文件操作 ===================
-function getBaseName(filePath) {
-  return filePath.split(/[\\/]/).pop();
+// ========== Splitter ==========
+function startSplit(e) {
+  isSplitting.value = true;
+  splitStartX = e.clientX;
+  splitStartRatio = splitRatio.value;
+  e.preventDefault();
 }
+function onSplitMove(e) {
+  if (!isSplitting.value || !mainLayout.value) return;
+  const r = mainLayout.value.getBoundingClientRect();
+  const d = (e.clientX - splitStartX) / r.width;
+  splitRatio.value = Math.min(Math.max(0.2, splitStartRatio + d), 0.8);
+}
+function stopSplit() { isSplitting.value = false; }
+document.addEventListener('mousemove', onSplitMove);
+document.addEventListener('mouseup', stopSplit);
+
+// ========== Drag & Drop File ==========
+function onDragOver() { isDragging.value = true; }
+function onDragLeave() { isDragging.value = false; }
+async function onDrop(e) {
+  isDragging.value = false;
+  const files = e.dataTransfer.files;
+  if (files.length === 0) return;
+  const file = files[0];
+  if (!file.name.endsWith('.puml') && !file.name.endsWith('.txt')) return;
+  try {
+    const content = await file.text();
+    createTab(content, file.name, file.path || null);
+    if (file.path && window.api) {
+      window.api.file.recentFiles.add(file.path).then(f => { recentFiles.value = f; });
+    }
+  } catch (err) { console.error('Drop error:', err); }
+}
+
+// ========== Tab Context Menu ==========
+const tabMenu = ref({ show: false, x: 0, y: 0, tabId: null, filePath: null });
+const batchCloseQueue = ref([]);
+
+function onTabContextMenu(e, tabId) {
+  const tab = tabs.value.find(t => t.id === tabId);
+  tabMenu.value = { show: true, x: e.clientX, y: e.clientY, tabId, filePath: tab?.filePath || null };
+}
+
+function closeContextMenu() { tabMenu.value.show = false; }
+
+function contextCloseTab() { closeContextMenu(); requestCloseTab(tabMenu.value.tabId); }
+
+function contextCloseOthers() {
+  closeContextMenu();
+  const currentId = tabMenu.value.tabId;
+  const others = tabs.value.filter(t => t.id !== currentId).reverse();
+  startBatchClose(others.map(t => t.id));
+}
+
+function contextCloseAll() {
+  closeContextMenu();
+  startBatchClose([...tabs.value].reverse().map(t => t.id));
+}
+
+function contextCopyPath() {
+  closeContextMenu();
+  if (tabMenu.value.filePath) navigator.clipboard.writeText(tabMenu.value.filePath);
+}
+
+function startBatchClose(ids) {
+  batchCloseQueue.value = ids;
+  advanceBatchClose();
+}
+
+function advanceBatchClose() {
+  while (batchCloseQueue.value.length > 0) {
+    const tid = batchCloseQueue.value[0];
+    const tab = tabs.value.find(t => t.id === tid);
+    if (!tab) { batchCloseQueue.value.shift(); continue; }
+    if (tab.code !== tab.savedContent) {
+      pendingCloseTabId.value = tid;
+      showUnsavedDialog.value = true;
+      return; // Wait for user response
+    }
+    doCloseTab(tid);
+    batchCloseQueue.value.shift();
+  }
+}
+
+// ========== Tab Drag & Drop ==========
+const dragTabIndex = ref(-1);
+const dragOverIndex = ref(-1);
+
+function onTabDragStart(e, idx) {
+  dragTabIndex.value = idx;
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', String(idx));
+}
+
+function onTabDragOver(e, idx) {
+  dragOverIndex.value = idx;
+}
+
+function onTabDragLeave() {
+  dragOverIndex.value = -1;
+}
+
+function onTabDrop(e, idx) {
+  const from = dragTabIndex.value;
+  dragTabIndex.value = -1;
+  dragOverIndex.value = -1;
+  if (from < 0 || from === idx) return;
+  const moved = tabs.value.splice(from, 1)[0];
+  const to = from < idx ? idx - 1 : idx;
+  tabs.value.splice(to, 0, moved);
+}
+
+// ========== Tab Operations ==========
+function switchTab(tabId, event) {
+  if (event?.shiftKey) {
+    requestCloseTab(tabId);
+    return;
+  }
+  if (tabId === activeTabId.value) return;
+  svg.value = '';
+  error.value = '';
+  activeTabId.value = tabId;
+}
+
+function requestCloseTab(tabId) {
+  const tab = tabs.value.find(t => t.id === tabId);
+  if (!tab) return;
+  if (tab.code !== tab.savedContent) {
+    pendingCloseTabId.value = tabId;
+    unsavedDialogMode.value = 'tab';
+    showUnsavedDialog.value = true;
+  } else {
+    doCloseTab(tabId);
+  }
+}
+
+function doCloseTab(tabId) {
+  const idx = tabs.value.findIndex(t => t.id === tabId);
+  if (idx < 0) return;
+  tabs.value.splice(idx, 1);
+  if (tabs.value.length === 0) {
+    activeTabId.value = null;
+    svg.value = '';
+    error.value = '';
+  } else if (activeTabId.value === tabId) {
+    activeTabId.value = tabs.value[Math.min(idx, tabs.value.length - 1)].id;
+  }
+}
+
+// ========== File Operations ==========
+function getBaseName(p) { return p.split(/[\\/]/).pop(); }
 
 function createNewDiagram() {
-  code.value = INITIAL_CODE;
-  fileName.value = '未命名绘图.puml';
-  currentFilePath.value = null;
-  savedContent.value = INITIAL_CODE; // 👈 重置快照
-  showWelcomeModal.value = false;
-  hasShownWelcome.value = true;
+  createTab(INITIAL_CODE, '未命名绘图.puml', null);
 }
 
 async function openExistingDiagram() {
-  if (!window.api) {
-    alert('此功能仅在 Electron 桌面应用中可用');
-    return;
-  }
-
+  if (!window.api) { alert('此功能仅在 Electron 桌面应用中可用'); return; }
   try {
     const result = await window.api.file.openFile();
     if (result.canceled) return;
+    // Replace empty single tab or create new
+    if (tabs.value.length === 1 && !activeTab.value.filePath && activeTab.value.code === INITIAL_CODE && activeTab.value.savedContent === INITIAL_CODE) {
+      const tab = activeTab.value;
+      tab.code = result.content;
+      tab.savedContent = result.content;
+      tab.fileName = getBaseName(result.filePath);
+      tab.filePath = result.filePath;
+    } else {
+      createTab(result.content, getBaseName(result.filePath), result.filePath);
+    }
+    recentFiles.value = await window.api.file.recentFiles.load();
+  } catch (err) { alert('打开文件时出错: ' + (err.message || '未知错误')); }
+}
 
-    code.value = result.content;
-    fileName.value = getBaseName(result.filePath);
-    currentFilePath.value = result.filePath;
-    savedContent.value = result.content; // 👈 更新快照
-    showWelcomeModal.value = false;
-    hasShownWelcome.value = true;
-  } catch (err) {
-    console.error('打开文件失败:', err);
-    alert('打开文件时出错: ' + (err.message || '未知错误'));
+async function openRecentFile(filePath) {
+  if (!window.api) return;
+  try {
+    const result = await window.api.file.readFile(filePath);
+    if (result.success) {
+      createTab(result.content, getBaseName(filePath), filePath);
+      recentFiles.value = await window.api.file.recentFiles.add(filePath);
+    }
+  } catch (err) { alert('无法打开文件: ' + (err.message || '未知错误')); }
+}
+
+async function saveTab(tab) {
+  if (!window.api) {
+    const blob = new Blob([tab.code], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = tab.fileName; a.click();
+    URL.revokeObjectURL(url);
+    tab.savedContent = tab.code;
+    return true;
+  }
+  if (tab.filePath) {
+    const result = await window.api.file.saveFile(tab.filePath, tab.code);
+    if (result.success) {
+      tab.savedContent = tab.code;
+      window.api.file.recentFiles.add(tab.filePath);
+      return true;
+    } else { alert('保存失败: ' + result.error); return false; }
+  } else {
+    const result = await window.api.file.saveFileAs(tab.code);
+    if (result.success && result.filePath) {
+      tab.filePath = result.filePath;
+      tab.fileName = getBaseName(result.filePath);
+      tab.savedContent = tab.code;
+      window.api.file.recentFiles.add(result.filePath);
+      return true;
+    }
+    return false;
   }
 }
 
 async function save() {
-  if (!window.api) {
-    // Web 环境
-    const blob = new Blob([code.value], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fileName.value;
-    a.click();
-    URL.revokeObjectURL(url);
-    savedContent.value = code.value; // 👈 Web 也更新快照
-    return;
-  }
-
-  if (currentFilePath.value) {
-    const result = await window.api.file.saveFile(currentFilePath.value, code.value);
-    if (result.success) {
-      savedContent.value = code.value; // 👈 成功后更新快照
-    } else {
-      alert('保存失败: ' + result.error);
-    }
-  } else {
-    const result = await window.api.file.saveFileAs(code.value);
-    if (result.success && result.filePath) {
-      currentFilePath.value = result.filePath;
-      fileName.value = getBaseName(result.filePath);
-      savedContent.value = code.value; // 👈 更新快照
-    }
-  }
+  if (!activeTab.value) return;
+  await saveTab(activeTab.value);
 }
 
-function openFile() {
-  openExistingDiagram();
-}
+function openFile() { openExistingDiagram(); }
 
 async function saveAs() {
-  if (!window.api) {
-    const blob = new Blob([code.value], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fileName.value;
-    a.click();
-    URL.revokeObjectURL(url);
-    savedContent.value = code.value; // 👈 Web 更新快照
-    return;
-  }
-
-  const result = await window.api.file.saveFileAs(code.value);
+  if (!activeTab.value || !window.api) return;
+  const tab = activeTab.value;
+  const result = await window.api.file.saveFileAs(tab.code);
   if (result.success && result.filePath) {
-    currentFilePath.value = result.filePath;
-    fileName.value = getBaseName(result.filePath);
-    savedContent.value = code.value; // 👈 更新快照
+    tab.filePath = result.filePath;
+    tab.fileName = getBaseName(result.filePath);
+    tab.savedContent = tab.code;
+    window.api.file.recentFiles.add(result.filePath);
   }
 }
 
-// =================== 快捷键 ===================
-const handleKeyDown = (e) => {
-  if (e.ctrlKey && e.key === 's') {
-    e.preventDefault();
-    save();
+// ========== Open path from OS ==========
+function handleOpenPath(filePath, content) {
+  suppressWelcome.value = false;
+  // Replace the empty initial tab if it's untouched
+  if (tabs.value.length === 1 && !activeTab.value.filePath && activeTab.value.code === INITIAL_CODE && activeTab.value.savedContent === INITIAL_CODE) {
+    const tab = activeTab.value;
+    tab.code = content;
+    tab.savedContent = content;
+    tab.fileName = getBaseName(filePath);
+    tab.filePath = filePath;
+  } else {
+    createTab(content, getBaseName(filePath), filePath);
   }
+  if (window.api) {
+    window.api.file.recentFiles.add(filePath).then(f => { recentFiles.value = f; });
+  }
+}
+
+// ========== Export ==========
+async function doExport(format) {
+  showExportMenu.value = false;
+  if (!canExport.value) return;
+  if (format === 'svg' && !isExporting.value) {
+    isExporting.value = true;
+    try {
+      const r = await window.api.plantuml.exportSvg({ code: activeTab.value.code });
+      if (!r.success && !r.canceled) alert('导出失败: ' + r.error);
+    } catch (err) { alert('导出失败: ' + (err.message || '未知错误')); }
+    finally { isExporting.value = false; }
+  } else if (format === 'png' && !isExportingPng.value) {
+    isExportingPng.value = true;
+    try {
+      const r = await window.api.plantuml.exportPng({ code: activeTab.value.code });
+      if (!r.success && !r.canceled) alert('导出失败: ' + r.error);
+    } catch (err) { alert('PNG 导出失败: ' + (err.message || '未知错误')); }
+    finally { isExportingPng.value = false; }
+  } else if (format === 'pdf' && !isExportingPdf.value) {
+    isExportingPdf.value = true;
+    try {
+      const r = await window.api.plantuml.exportPdf({ code: activeTab.value.code });
+      if (!r.success && !r.canceled) alert('导出失败: ' + r.error);
+    } catch (err) { alert('PDF 导出失败: ' + (err.message || '未知错误')); }
+    finally { isExportingPdf.value = false; }
+  }
+}
+
+// ========== Cursor ==========
+function onCursorChange({ line, column }) { cursorLine.value = line; cursorColumn.value = column; }
+
+// ========== Keyboard ==========
+const handleKeyDown = (e) => {
+  if (e.ctrlKey && e.key === 's') { e.preventDefault(); save(); }
 };
 
-// =================== 导出 & 复制逻辑 ===================
-const canExportOrCopy = computed(() => code.value.trim().length > 0);
-
-async function exportAsSvg() {
-  if (!canExportOrCopy.value || isExporting.value) return;
-  
-  isExporting.value = true;
-  try {
-    const result = await window.api.plantuml.exportImage({
-      code: code.value,
-      format: 'svg'
-    });
-
-    if (result.success) {
-      // 可选：自动打开
-      // await window.api.shell.openPath(result.filePath);
-    } else if (!result.canceled) {
-      alert('导出失败: ' + result.error);
-    }
-  } catch (err) {
-    console.error('导出失败:', err);
-    alert('导出失败: ' + (err.message || '未知错误'));
-  } finally {
-    isExporting.value = false;
+// ========== Unsaved Dialog Actions ==========
+function advanceSequentialClose() {
+  if (sequentialCloseQueue.value.length === 0) {
+    sequentialCloseMode.value = false;
+    window.api?.unsavedDialogResponse('discard');
+    return;
+  }
+  const nextId = sequentialCloseQueue.value[0];
+  const nextTab = tabs.value.find(t => t.id === nextId);
+  if (!nextTab) {
+    sequentialCloseQueue.value.shift();
+    advanceSequentialClose();
+    return;
+  }
+  switchTab(nextId);
+  if (nextTab.code !== nextTab.savedContent) {
+    showUnsavedDialog.value = true;
+  } else {
+    doCloseTab(nextId);
+    sequentialCloseQueue.value.shift();
+    advanceSequentialClose();
   }
 }
 
-// =================== 生命周期 ===================
-onMounted(() => {
+async function unsavedSave() {
+  showUnsavedDialog.value = false;
+  if (sequentialCloseMode.value) {
+    const tab = sequentialCloseTab.value;
+    if (tab) {
+      await saveTab(tab);
+      doCloseTab(tab.id);
+      sequentialCloseQueue.value.shift();
+      advanceSequentialClose();
+    }
+  } else if (batchCloseQueue.value.length > 0) {
+    const tid = batchCloseQueue.value.shift();
+    const tab = tabs.value.find(t => t.id === tid);
+    if (tab) { await saveTab(tab); doCloseTab(tid); }
+    pendingCloseTabId.value = null;
+    advanceBatchClose();
+  } else {
+    const tab = tabs.value.find(t => t.id === pendingCloseTabId.value);
+    if (tab) {
+      const ok = await saveTab(tab);
+      if (ok) doCloseTab(pendingCloseTabId.value);
+    }
+    pendingCloseTabId.value = null;
+  }
+}
+
+function unsavedDiscard() {
+  showUnsavedDialog.value = false;
+  if (sequentialCloseMode.value) {
+    const tab = sequentialCloseTab.value;
+    if (tab) {
+      doCloseTab(tab.id);
+      sequentialCloseQueue.value.shift();
+    }
+    advanceSequentialClose();
+  } else if (batchCloseQueue.value.length > 0) {
+    const tid = batchCloseQueue.value.shift();
+    doCloseTab(tid);
+    pendingCloseTabId.value = null;
+    advanceBatchClose();
+  } else {
+    doCloseTab(pendingCloseTabId.value);
+    pendingCloseTabId.value = null;
+  }
+}
+
+function unsavedCancel() {
+  showUnsavedDialog.value = false;
+  if (sequentialCloseMode.value) {
+    sequentialCloseMode.value = false;
+    sequentialCloseQueue.value = [];
+    window.api?.unsavedDialogResponse('cancel');
+  }
+  batchCloseQueue.value = [];
+  pendingCloseTabId.value = null;
+}
+
+// ========== Lifecycle ==========
+let beforeUnloadHandler = null;
+
+onMounted(async () => {
   window.addEventListener('keydown', handleKeyDown);
+
+  // Check for pending file (query param set by main process)
+  const urlParams = new URLSearchParams(window.location.search);
+  const hasPending = urlParams.get('pending') === '1';
+  if (hasPending) {
+    suppressWelcome.value = true;
+    setTimeout(() => { suppressWelcome.value = false; }, 500);
+  }
+
+  if (window.api) {
+    try { recentFiles.value = await window.api.file.recentFiles.load(); } catch {}
+  }
+
+  // Menu events
+  if (window.api?.onMenuEvent) {
+    window.api.onMenuEvent((action, ...args) => {
+      switch (action) {
+        case 'openFile': openFile(); break;
+        case 'save': save(); break;
+        case 'saveAs': saveAs(); break;
+        case 'exportSvg': doExport('svg'); break;
+        case 'exportPng': doExport('png'); break;
+        case 'exportPdf': doExport('pdf'); break;
+        case 'zoomIn': zoomIn(); break;
+        case 'zoomOut': zoomOut(); break;
+        case 'resetView': resetView(); break;
+        case 'closeTab': if (activeTab.value) requestCloseTab(activeTab.value.id); break;
+        case 'openPath': handleOpenPath(args[0], args[1]); break;
+      }
+    });
+  }
+
+  // Unsaved changes dialog from main process (app close)
+  if (window.api?.onUnsavedDialog) {
+    window.api.onUnsavedDialog(() => {
+      if (tabs.value.length === 0) {
+        window.api.unsavedDialogResponse('discard');
+        return;
+      }
+      sequentialCloseQueue.value = [...tabs.value].reverse().map(t => t.id);
+      sequentialCloseMode.value = true;
+      advanceSequentialClose();
+    });
+  }
+
+  window.__hasUnsavedChanges__ = () => tabs.value.some(t => t.code !== t.savedContent);
+  window.__saveAllAndQuit__ = async () => {
+    const modified = tabs.value.filter(t => t.code !== t.savedContent);
+    for (const tab of modified) {
+      await saveTab(tab);
+    }
+    if (window.api?.app) window.api.app.quit();
+    return true;
+  };
+
+  beforeUnloadHandler = (e) => {
+    if (tabs.value.some(t => t.code !== t.savedContent)) {
+      e.preventDefault(); e.returnValue = '';
+    }
+  };
+  window.addEventListener('beforeunload', beforeUnloadHandler);
 });
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeyDown);
+  if (beforeUnloadHandler) window.removeEventListener('beforeunload', beforeUnloadHandler);
+  delete window.__hasUnsavedChanges__;
+  delete window.__saveAllAndQuit__;
 });
 
-// =================== 示例加载 ===================
+// ========== Examples & Theme ==========
 const loadExample = () => {
   const key = selectedExample.value;
   if (key && PLANTUML_EXAMPLES[key]) {
-    code.value = PLANTUML_EXAMPLES[key].code;
-    currentFilePath.value = null;
-    savedContent.value = PLANTUML_EXAMPLES[key].code; // 👈 示例加载视为已保存
+    if (activeTab.value) {
+      activeTab.value.code = PLANTUML_EXAMPLES[key].code;
+      activeTab.value.savedContent = activeTab.value.code;
+      activeTab.value.filePath = null;
+    }
+    syncThemeFromCode();
   }
 };
 
-// =================== 关闭应用逻辑 ===================
-async function closeApp() {
-  if (!isContentModified.value) {
-    // 无修改，直接退出
-    if (window.api?.app) {
-      window.api.app.quit();
-    } else {
-      alert('Web 版无法关闭窗口，请手动关闭标签页');
-    }
+const THEME_REGEX = /^!theme\s+(\S+)\s*$/m;
+
+function syncThemeFromCode() {
+  const code = activeTab.value?.code || '';
+  const match = code.match(THEME_REGEX);
+  selectedTheme.value = (match && PLANTUML_THEMES.some(t => t.value === match[1])) ? match[1] : '';
+}
+
+function applyTheme() {
+  if (!activeTab.value) return;
+  const theme = selectedTheme.value;
+  const lines = activeTab.value.code.split('\n');
+  const idx = lines.findIndex(l => /^!theme\s/.test(l));
+  if (!theme) {
+    if (idx >= 0) { lines.splice(idx, 1); activeTab.value.code = lines.join('\n'); }
     return;
   }
-
-  // 有未保存的修改
-  if (!window.api?.dialog) {
-    const confirmed = confirm('当前有未保存的更改，确定要退出吗？');
-    if (confirmed) {
-      window.close();
-    }
-    return;
+  const line = `!theme ${theme}`;
+  if (idx >= 0) lines[idx] = line;
+  else {
+    const start = lines.findIndex(l => /^@startuml/.test(l));
+    if (start >= 0) lines.splice(start + 1, 0, line);
+    else lines.unshift(line);
   }
-
-  const { response } = await window.api.dialog.showMessageBox({
-    type: 'warning',
-    buttons: ['保存', '不保存', '取消'],
-    defaultId: 0,
-    cancelId: 2,
-    message: '当前有未保存的更改，是否保存？'
-  });
-
-  if (response === 0) {
-    // 保存
-    await save();
-    // 保存后无论内容如何，都允许退出
-    if (window.api?.app) window.api.app.quit();
-  } else if (response === 1) {
-    // 不保存
-    if (window.api?.app) window.api.app.quit();
-  }
-  // response === 2: 取消，不退出
+  activeTab.value.code = lines.join('\n');
 }
 </script>
