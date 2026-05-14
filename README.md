@@ -91,34 +91,9 @@ plantuml-desktop/
 └── README.md
 ```
 
-## 版本管理
-
-本项目遵循 [Semantic Versioning](https://semver.org/)。
-
-版本号格式：`MAJOR.MINOR.PATCH`
-
-- `MAJOR` — 重大架构变更或不兼容的 API 修改
-- `MINOR` — 新功能，向后兼容
-- `PATCH` — Bug 修复，向后兼容
-
-### 发布流程
-
-```bash
-# 1. 更新版本号
-npm version patch  # 或 minor / major
-
-# 2. 构建并打包
-npm run build:win
-
-# 3. 上传 release\PlantUML Editor Setup x.x.x.exe 到 GitHub Releases
-
-# 4. 推送标签
-git push --follow-tags
-```
-
 ## License
 
-ISC
+GPL-3.0
 
 ## 致谢
 

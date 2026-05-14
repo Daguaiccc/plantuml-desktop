@@ -10,7 +10,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "GPL-3.0",
   "description": "",
   "build": {
     "appId": "com.plantuml.desktop",
