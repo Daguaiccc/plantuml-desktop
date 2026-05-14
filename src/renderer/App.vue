@@ -33,23 +33,21 @@
 
     <!-- Tab bar -->
     <div v-if="tabs.length >= 1" class="tab-bar">
-      <div class="tab-bar-inner">
-        <div
-          v-for="(tab, idx) in tabs" :key="tab.id"
-          class="tab-item"
-          :class="{ active: tab.id === activeTabId, 'drag-over': dragOverIndex === idx && dragTabIndex !== idx, dragging: dragTabIndex === idx }"
-          draggable="true"
-          @click="switchTab(tab.id, $event)"
-          @dragstart="onTabDragStart($event, idx)"
-          @dragover.prevent="onTabDragOver($event, idx)"
-          @dragenter.prevent
-          @dragleave="onTabDragLeave($event)"
-          @drop="onTabDrop($event, idx)"
-          @contextmenu.prevent="onTabContextMenu($event, tab.id)"
-        >
-          <span class="tab-label">{{ tab.fileName }}{{ tab.code !== tab.savedContent ? ' *' : '' }}</span>
-          <button class="tab-close-btn" @click.stop="requestCloseTab(tab.id)" title="关闭">&times;</button>
-        </div>
+      <div
+        v-for="(tab, idx) in tabs" :key="tab.id"
+        class="tab-item"
+        :class="{ active: tab.id === activeTabId, 'drag-over': dragOverIndex === idx && dragTabIndex !== idx, dragging: dragTabIndex === idx }"
+        draggable="true"
+        @click="switchTab(tab.id, $event)"
+        @dragstart="onTabDragStart($event, idx)"
+        @dragover.prevent="onTabDragOver($event, idx)"
+        @dragenter.prevent
+        @dragleave="onTabDragLeave($event)"
+        @drop="onTabDrop($event, idx)"
+        @contextmenu.prevent="onTabContextMenu($event, tab.id)"
+      >
+        <span class="tab-label">{{ tab.fileName }}{{ tab.code !== tab.savedContent ? ' *' : '' }}</span>
+        <button class="tab-close-btn" @click.stop="requestCloseTab(tab.id)" title="关闭">&times;</button>
       </div>
       <button class="tab-new-btn" @click="createNewDiagram" title="新建标签页">+</button>
     </div>
