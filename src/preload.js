@@ -23,6 +23,11 @@ contextBridge.exposeInMainWorld('api', {
   app: {
     quit: () => ipcRenderer.invoke('app:quit')
   },
+  ai: {
+    loadConfig: () => ipcRenderer.invoke('ai:config:load'),
+    saveConfig: (config) => ipcRenderer.invoke('ai:config:save', config),
+    chat: (messages, currentCode) => ipcRenderer.invoke('ai:chat', { messages, currentCode })
+  },
   onMenuEvent: (callback) => {
     ipcRenderer.on('menu:openFile', () => callback('openFile'));
     ipcRenderer.on('menu:save', () => callback('save'));

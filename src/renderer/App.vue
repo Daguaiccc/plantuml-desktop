@@ -6,6 +6,9 @@
     @drop.prevent="onDrop"
     @mousedown="onClickOutside"
   >
+    <!-- Toast -->
+    <div v-if="toastMessage" class="toast">{{ toastMessage }}</div>
+
     <!-- Drag overlay -->
     <div v-if="isDragging" class="drag-overlay">释放文件以打开</div>
 
@@ -16,6 +19,7 @@
         <span class="file-name">{{ displayFileName }}{{ isModified ? ' *' : '' }}</span>
       </div>
       <div class="title-bar-right">
+        <button @click="toggleAIPanel" class="toolbar-btn icon-btn ai-btn" :class="{ active: showAIPanel }" title="AI 绘图助手">💬</button>
         <button @click="showCheatsheet = true" class="toolbar-btn icon-btn" title="语法速查">?</button>
         <button @click="openFile" class="toolbar-btn" :disabled="isBusy">打开</button>
         <button @click="save" class="toolbar-btn" :disabled="isBusy">保存</button>
@@ -87,13 +91,16 @@
       </div>
     </div>
 
+    <!-- AIConfigPanel (modal) -->
+    <AIConfigPanel :show="showAIConfig" @close="showAIConfig = false" @saved="showAIPanel = true" />
+
     <!-- Syntax cheatsheet -->
     <SyntaxCheatsheet :show="showCheatsheet" @close="showCheatsheet = false" />
 
     <!-- Main layout -->
     <div v-if="tabs.length > 0" class="main-layout" ref="mainLayout">
       <!-- Left: Editor -->
-      <div class="editor-panel" :style="{ width: `calc(${splitRatio * 100}% - 8px)` }">
+      <div class="editor-panel" :style="editorPanelStyle">
         <div class="editor-toolbar">
           <div class="toolbar-group">
             <span class="label">示例</span>
@@ -123,7 +130,7 @@
       <div class="splitter" :class="{ active: isSplitting }" @mousedown="startSplit"></div>
 
       <!-- Right: Preview -->
-      <div class="preview-panel" :style="{ width: `calc(${(1 - splitRatio) * 100}% - 8px)` }">
+      <div class="preview-panel" :style="previewPanelStyle">
         <div class="preview-controls">
           <button @click="zoomOut" title="缩小">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12H19" /></svg>
@@ -162,6 +169,12 @@
           <span>行 {{ cursorLine }}, 列 {{ cursorColumn }}</span>
         </div>
       </div>
+
+      <!-- AI splitter -->
+      <div v-if="showAIPanel" class="splitter ai-splitter" :class="{ active: isAISplitting }" @mousedown="startAISplit"></div>
+
+      <!-- AI Chat Panel (inline) -->
+      <AIPanel v-if="showAIPanel" :show="showAIPanel" :currentCode="activeTab?.code || ''" :style="{ width: aiSplitWidth + 'px' }" @close="showAIPanel = false" @openConfig="showAIConfig = true" @insertCode="onAIInsertCode" />
     </div>
   </div>
 </template>
@@ -171,6 +184,8 @@ import { ref, watch, nextTick, onMounted, onUnmounted, computed } from 'vue';
 import _debounce from 'lodash/debounce';
 import PlantUmlEditor from './components/PlantUmlEditor.vue';
 import SyntaxCheatsheet from './components/SyntaxCheatsheet.vue';
+import AIPanel from './components/AIPanel.vue';
+import AIConfigPanel from './components/AIConfigPanel.vue';
 import logo from '../assets/logo-app.png';
 import { PLANTUML_EXAMPLES, EXAMPLE_OPTIONS } from './examples/plantumlExamples.js';
 
@@ -198,7 +213,14 @@ let nextTabId = 1;
 const tabs = ref([]);
 const activeTabId = ref(null);
 
+const toastMessage = ref('');
+function showToast(msg) { toastMessage.value = msg; setTimeout(() => { toastMessage.value = ''; }, 2000); }
+
 function createTab(code, fileName, filePath) {
+  if (tabs.value.length >= 10) {
+    showToast('最多同时打开 10 个标签页');
+    return null;
+  }
   const id = String(nextTabId++);
   const tab = { id, fileName: fileName || '未命名绘图.puml', filePath: filePath || null, code: code || INITIAL_CODE, savedContent: code || INITIAL_CODE };
   tabs.value.push(tab);
@@ -228,8 +250,22 @@ const showWelcome = computed(() => !suppressWelcome.value && tabs.value.length =
 // Recent files
 const recentFiles = ref([]);
 
-// Syntax cheatsheet
+// Syntax cheatsheet & AI panel
 const showCheatsheet = ref(false);
+const showAIPanel = ref(false);
+const showAIConfig = ref(false);
+
+function toggleAIPanel() {
+  if (showAIPanel.value) { showAIPanel.value = false; return; }
+  if (!window.api?.ai) return;
+  window.api.ai.loadConfig().then(c => {
+    if (c && c.apiKey || c && c.provider === 'ollama') {
+      showAIPanel.value = true;
+    } else {
+      showAIConfig.value = true;
+    }
+  });
+}
 
 // Export dropdown
 const showExportMenu = ref(false);
@@ -274,10 +310,26 @@ let panStartY = 0;
 
 // Splitter
 const splitRatio = ref(0.5);
+const aiSplitWidth = ref(350);
+const editorPanelStyle = computed(() => {
+  const base = showAIPanel.value
+    ? `calc(${splitRatio.value * 100}% - ${splitRatio.value * aiSplitWidth.value}px - 8px)`
+    : `calc(${splitRatio.value * 100}% - 8px)`;
+  return { width: base };
+});
+const previewPanelStyle = computed(() => {
+  const base = showAIPanel.value
+    ? `calc(${(1 - splitRatio.value) * 100}% - ${(1 - splitRatio.value) * aiSplitWidth.value}px - 8px)`
+    : `calc(${(1 - splitRatio.value) * 100}% - 8px)`;
+  return { width: base };
+});
 const isSplitting = ref(false);
+const isAISplitting = ref(false);
 const mainLayout = ref(null);
 let splitStartX = 0;
 let splitStartRatio = 0.5;
+let aiSplitStartX = 0;
+let aiSplitStartWidth = 350;
 
 // Drag & drop
 const isDragging = ref(false);
@@ -331,6 +383,9 @@ watch(editorCode, debouncedRender, { immediate: true });
 const debouncedSyncTheme = _debounce(syncThemeFromCode, 300);
 watch(editorCode, debouncedSyncTheme);
 
+watch(showAIPanel, () => {
+  nextTick(() => { if (svg.value) fitToContainer(); });
+});
 watch(svg, () => {
   nextTick(() => {
     fitToContainer();
@@ -425,13 +480,24 @@ function startSplit(e) {
   splitStartRatio = splitRatio.value;
   e.preventDefault();
 }
-function onSplitMove(e) {
-  if (!isSplitting.value || !mainLayout.value) return;
-  const r = mainLayout.value.getBoundingClientRect();
-  const d = (e.clientX - splitStartX) / r.width;
-  splitRatio.value = Math.min(Math.max(0.2, splitStartRatio + d), 0.8);
+function startAISplit(e) {
+  isAISplitting.value = true;
+  aiSplitStartX = e.clientX;
+  aiSplitStartWidth = aiSplitWidth.value;
+  e.preventDefault();
 }
-function stopSplit() { isSplitting.value = false; }
+function onSplitMove(e) {
+  if (isSplitting.value && mainLayout.value) {
+    const r = mainLayout.value.getBoundingClientRect();
+    const d = (e.clientX - splitStartX) / r.width;
+    splitRatio.value = Math.min(Math.max(0.2, splitStartRatio + d), 0.8);
+  }
+  if (isAISplitting.value) {
+    const d = aiSplitStartX - e.clientX;
+    aiSplitWidth.value = Math.min(Math.max(250, aiSplitStartWidth + d), 500);
+  }
+}
+function stopSplit() { isSplitting.value = false; isAISplitting.value = false; }
 document.addEventListener('mousemove', onSplitMove);
 document.addEventListener('mouseup', stopSplit);
 
@@ -660,6 +726,12 @@ async function saveAs() {
     tab.savedContent = tab.code;
     window.api.file.recentFiles.add(result.filePath);
   }
+}
+
+// ========== AI Insert Code ==========
+function onAIInsertCode(code) {
+  if (!code || !activeTab.value) return;
+  activeTab.value.code = code;
 }
 
 // ========== Open path from OS ==========

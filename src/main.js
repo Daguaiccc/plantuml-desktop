@@ -463,6 +463,91 @@ ipcMain.handle('recent-files:add', (_event, filePath) => {
   return loadRecentFiles();
 });
 
+// ========== AI Config ==========
+function getAIConfigPath() {
+  const dir = getCacheDir();
+  if (!fsSync.existsSync(dir)) fsSync.mkdirSync(dir, { recursive: true });
+  return path.join(dir, 'ai-config.json');
+}
+
+function loadAIConfig() {
+  try {
+    const p = getAIConfigPath();
+    if (fsSync.existsSync(p)) return JSON.parse(fsSync.readFileSync(p, 'utf8'));
+  } catch {}
+  return null;
+}
+
+function saveAIConfig(config) {
+  try {
+    fsSync.writeFileSync(getAIConfigPath(), JSON.stringify(config, null, 2), 'utf8');
+    return true;
+  } catch { return false; }
+}
+
+ipcMain.handle('ai:config:load', () => loadAIConfig());
+ipcMain.handle('ai:config:save', (_event, config) => saveAIConfig(config));
+
+// ========== AI Chat ==========
+const SYSTEM_PROMPT = `你是一位资深软件架构师和 PlantUML 专家，帮助 Java 工程师设计系统架构图。
+
+用户是 Java 后端工程师，主要用 PlantUML 绘制设计方案中的时序图、类图、用例图、活动图、组件图、部署图、状态图等。
+
+回复格式要求：
+1. 先用简洁的中文解释你画的图表达了什么、关键设计要点、各组件之间的关系
+2. 然后用 @startuml ... @enduml 包裹完整的 PlantUML 代码
+3. 代码中可使用中文标签和注释，排版清晰
+4. 如果用户要求修改现有图表，基于提供的当前代码进行修改
+
+当前编辑器中的 PlantUML 代码：
+---
+{currentCode}
+---`;
+
+async function callAI(config, messages) {
+  const { provider, apiKey, baseUrl, model } = config;
+
+  if (provider !== 'anthropic' && provider !== 'gemini') {
+    const url = `${baseUrl}/chat/completions`;
+    const headers = { 'Content-Type': 'application/json' };
+    if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+    const body = JSON.stringify({ model, messages, temperature: 0.3, stream: false });
+    const resp = await fetch(url, { method: 'POST', headers, body, signal: AbortSignal.timeout(30000) });
+    if (!resp.ok) { const err = await resp.text().catch(() => ''); throw new Error(`API 请求失败 (${resp.status}): ${err}`); }
+    const data = await resp.json();
+    return data.choices?.[0]?.message?.content || '';
+  }
+
+  if (provider === 'anthropic') {
+    const systemMsg = messages.find(m => m.role === 'system');
+    const userMsgs = messages.filter(m => m.role !== 'system');
+    const body = JSON.stringify({ model, system: systemMsg?.content || '', messages: userMsgs, max_tokens: 4096, temperature: 0.3 });
+    const resp = await fetch(`${baseUrl}/v1/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }, body, signal: AbortSignal.timeout(30000) });
+    if (!resp.ok) throw new Error(`Anthropic API 请求失败 (${resp.status})`);
+    const data = await resp.json();
+    return data.content?.[0]?.text || '';
+  }
+
+  if (provider === 'gemini') {
+    const contents = messages.filter(m => m.role !== 'system').map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }));
+    const body = JSON.stringify({ contents });
+    const resp = await fetch(`${baseUrl}/models/${model}:generateContent?key=${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(30000) });
+    if (!resp.ok) throw new Error(`Gemini API 请求失败 (${resp.status})`);
+    const data = await resp.json();
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  }
+
+  throw new Error('未知的 AI 提供商');
+}
+
+ipcMain.handle('ai:chat', async (_event, { messages, currentCode }) => {
+  const config = loadAIConfig();
+  if (!config) throw new Error('请先配置 AI 模型');
+  const sysPrompt = SYSTEM_PROMPT.replace('{currentCode}', currentCode || '(空)');
+  const fullMessages = [{ role: 'system', content: sysPrompt }, ...messages];
+  return await callAI(config, fullMessages);
+});
+
 // ========== App Quit ==========
 ipcMain.handle('app:quit', () => { if (mainWindow) mainWindow.close(); });
 
