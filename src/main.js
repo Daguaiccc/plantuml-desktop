@@ -1,5 +1,5 @@
 // src/main.js
-const { app, BrowserWindow, ipcMain, dialog, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, nativeImage, safeStorage } = require('electron');
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const path = require('path');
@@ -129,6 +129,23 @@ function createWindow() {
     }
   });
 
+  // ===== 渲染进程诊断（仅开发模式，定位渲染层错误）=====
+  if (!app.isPackaged) {
+    mainWindow.webContents.on('console-message', (_e, levelOrDetails, message, line, sourceId) => {
+      if (typeof levelOrDetails === 'object') {
+        console.log(`[renderer] L${levelOrDetails.level}: ${levelOrDetails.message} (${levelOrDetails.sourceId}:${levelOrDetails.lineNumber})`);
+      } else {
+        console.log(`[renderer] L${levelOrDetails}: ${message} (${sourceId}:${line})`);
+      }
+    });
+    mainWindow.webContents.on('render-process-gone', (_e, details) => {
+      console.error(`[renderer-gone] reason=${details.reason} exitCode=${details.exitCode}`);
+    });
+    mainWindow.webContents.on('did-fail-load', (_e, code, desc) => {
+      console.error(`[did-fail-load] ${code} ${desc}`);
+    });
+  }
+
   // Use query param to signal pending file so renderer skips welcome flash
   const pendingQuery = pendingOpenFilePath ? { pending: '1' } : {};
   if (isDev) {
@@ -248,7 +265,7 @@ app.whenReady().then(() => {
             dialog.showMessageBox(mainWindow, {
               type: 'info',
               title: '关于 PlantUML 编辑器',
-              message: 'PlantUML 编辑器 v1.0.0',
+              message: `PlantUML 编辑器 v${app.getVersion()}`,
               detail: '基于 Electron + Vue 3 + Monaco Editor 构建的离线 PlantUML 桌面编辑器。'
             });
           }
@@ -282,7 +299,7 @@ ipcMain.handle('dialog:unsavedChangesResponse', async (_event, action) => {
   }
 });
 
-// ========== PlantUML Render ==========
+// ========== PlantUML Render (serialized, self-healing) ==========
 function createPlantumlProcess() {
   if (plantumlProcess) { try { plantumlProcess.kill(); } catch {} }
   const jarPath = getResourcePath('bin/plantuml.jar');
@@ -290,49 +307,86 @@ function createPlantumlProcess() {
     ? getResourcePath('jre/bin/java.exe')
     : getResourcePath('jre/bin/java');
 
-  plantumlProcess = spawn(
+  const proc = spawn(
     `"${javaExe}"`,
     ['-jar', `"${jarPath}"`, '-pipe', '-tsvg', '-charset', 'UTF-8'],
     { shell: true, stdio: ['pipe', 'pipe', 'pipe'] }
   );
-  plantumlProcess.on('error', (err) => { console.error('Failed to start PlantUML process:', err); });
-  plantumlProcess.on('exit', () => { plantumlProcess = null; });
-  return plantumlProcess;
+  plantumlProcess = proc;
+  proc.on('error', (err) => { console.error('Failed to start PlantUML process:', err); });
+  // 只有"当前进程"退出才清引用；防止旧进程的 exit 事件清掉重建后的新进程
+  proc.on('exit', () => { if (plantumlProcess === proc) plantumlProcess = null; });
+  return proc;
 }
 
+// 渲染请求串行队列：一次只处理一个，后续请求排队。
+// 管道进程同一时刻只能有一个写者/监听者，并发渲染会互相抢 stdout 监听导致输出错乱。
+let renderQueue = Promise.resolve();
+
 ipcMain.handle('render-plantuml', async (_event, plantumlCode) => {
+  const task = renderQueue.then(() => renderOnce(plantumlCode));
+  renderQueue = task.catch(() => {});
+  return task;
+});
+
+function renderOnce(plantumlCode) {
   if (!plantumlProcess || plantumlProcess.exitCode !== null) {
     createPlantumlProcess();
   }
 
   return new Promise((resolve, reject) => {
+    let settled = false;
     let output = '';
     let errorOutput = '';
-    let timeoutId = setTimeout(() => reject(new Error('PlantUML 渲染超时')), 5000);
+    let pollTimer = null;
 
-    plantumlProcess.stdout.removeAllListeners('data');
-    plantumlProcess.stderr.removeAllListeners('data');
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      if (pollTimer !== null) clearTimeout(pollTimer);
+      plantumlProcess.stdout.removeAllListeners('data');
+      plantumlProcess.stderr.removeAllListeners('data');
+    };
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn(value);
+    };
+
+    // 超时：管道里可能残留半截输出，直接销毁重建，避免污染后续渲染
+    const timeoutId = setTimeout(() => {
+      const err = new Error('PlantUML 渲染超时');
+      try { plantumlProcess.kill(); } catch {}
+      plantumlProcess = null;
+      finish(reject, err);
+    }, 5000);
+
     plantumlProcess.stdout.on('data', (chunk) => { output += chunk.toString('utf8'); });
     plantumlProcess.stderr.on('data', (chunk) => { errorOutput += chunk.toString('utf8'); });
 
     const checkComplete = () => {
+      if (settled) return;
       if (output.includes('</svg>')) {
-        clearTimeout(timeoutId);
         let errorLine = null;
         if (errorOutput) {
           const match = errorOutput.match(/line[:\s]*(\d+)/i);
           if (match) errorLine = parseInt(match[1]);
         }
-        resolve({ svg: output, errorLine, errorMessage: errorOutput.trim() || null });
+        finish(resolve, { svg: output, errorLine, errorMessage: errorOutput.trim() || null });
       } else {
-        setTimeout(checkComplete, 10);
+        pollTimer = setTimeout(checkComplete, 10);
       }
     };
 
-    plantumlProcess.stdin.write(plantumlCode.trimEnd() + '\n');
+    try {
+      plantumlProcess.stdin.write(plantumlCode.trimEnd() + '\n');
+    } catch (err) {
+      finish(reject, err);
+      return;
+    }
     checkComplete();
   });
-});
+}
 
 // ========== Export Handlers ==========
 ipcMain.handle('plantuml:export-svg', async (_event, { code }) => handleExport({ code, format: 'SVG', title: '导出 SVG 图像', defaultName: 'diagram.svg', ext: 'svg', plantumlFlag: '-tsvg' }));
@@ -473,17 +527,47 @@ function getAIConfigPath() {
 function loadAIConfig() {
   try {
     const p = getAIConfigPath();
-    if (fsSync.existsSync(p)) return JSON.parse(fsSync.readFileSync(p, 'utf8'));
+    if (fsSync.existsSync(p)) {
+      const config = JSON.parse(fsSync.readFileSync(p, 'utf8'));
+      // 解密 apiKey（safeStorage 加密格式：{ enc: base64 }）；无法解密时置空
+      if (config.apiKey && typeof config.apiKey === 'object' && config.apiKey.enc && safeStorage.isEncryptionAvailable()) {
+        try { config.apiKey = safeStorage.decryptString(Buffer.from(config.apiKey.enc, 'base64')); }
+        catch { config.apiKey = ''; }
+      }
+      return config;
+    }
   } catch {}
   return null;
 }
 
 function saveAIConfig(config) {
   try {
-    fsSync.writeFileSync(getAIConfigPath(), JSON.stringify(config, null, 2), 'utf8');
+    const stored = { ...config };
+    // 仅加密 apiKey，其余字段保持明文以便读取；safeStorage 不可用时退化为明文
+    if (stored.apiKey && safeStorage.isEncryptionAvailable()) {
+      stored.apiKey = { enc: safeStorage.encryptString(stored.apiKey).toString('base64') };
+    }
+    fsSync.writeFileSync(getAIConfigPath(), JSON.stringify(stored, null, 2), 'utf8');
     return true;
   } catch { return false; }
 }
+
+// 测试连接：用传入的配置发最小请求，不保存
+ipcMain.handle('ai:test', async (_event, config) => {
+  if (!config || !config.provider || !config.model) throw new Error('配置不完整');
+  const saved = loadAIConfig();
+  const testConfig = { ...(saved || {}), ...config };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error('测试超时')), 15000);
+  try {
+    const reply = await streamAI(testConfig, [{ role: 'user', content: 'ping' }], () => {}, controller.signal);
+    return { ok: true, preview: (reply || '').slice(0, 300) };
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) };
+  } finally {
+    clearTimeout(timeout);
+  }
+});
 
 ipcMain.handle('ai:config:load', () => loadAIConfig());
 ipcMain.handle('ai:config:save', (_event, config) => saveAIConfig(config));
@@ -504,48 +588,143 @@ const SYSTEM_PROMPT = `你是一位资深软件架构师和 PlantUML 专家，�
 {currentCode}
 ---`;
 
-async function callAI(config, messages) {
+// 解析 SSE 文本流：逐 data 行调用 onData(JSON)
+async function streamSSE(resp, onData, signal) {
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let done = false;
+  while (!done) {
+    const { done: rDone, value } = await reader.read();
+    if (rDone) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const data = trimmed.slice(5).trim();
+      if (data === '[DONE]') { done = true; break; }
+      if (data.length > 0) {
+        try { onData(JSON.parse(data)); } catch { /* 忽略坏行 */ }
+      }
+    }
+  }
+}
+
+// 流式调用 AI：增量文本通过 onDelta 推送，resolve 时返回完整文本
+async function streamAI(config, messages, onDelta, signal) {
   const { provider, apiKey, baseUrl, model } = config;
 
   if (provider !== 'anthropic' && provider !== 'gemini') {
     const url = `${baseUrl}/chat/completions`;
     const headers = { 'Content-Type': 'application/json' };
     if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
-    const body = JSON.stringify({ model, messages, temperature: 0.3, stream: false });
-    const resp = await fetch(url, { method: 'POST', headers, body, signal: AbortSignal.timeout(30000) });
+    const body = JSON.stringify({ model, messages, temperature: 0.3, stream: true });
+    const resp = await fetch(url, { method: 'POST', headers, body, signal });
     if (!resp.ok) { const err = await resp.text().catch(() => ''); throw new Error(`API 请求失败 (${resp.status}): ${err}`); }
-    const data = await resp.json();
-    return data.choices?.[0]?.message?.content || '';
+    let full = '';
+    await streamSSE(resp, (json) => {
+      const delta = json.choices?.[0]?.delta?.content;
+      if (typeof delta === 'string' && delta.length > 0) { full += delta; onDelta(delta); }
+    }, signal);
+    return full;
   }
 
   if (provider === 'anthropic') {
     const systemMsg = messages.find(m => m.role === 'system');
     const userMsgs = messages.filter(m => m.role !== 'system');
-    const body = JSON.stringify({ model, system: systemMsg?.content || '', messages: userMsgs, max_tokens: 4096, temperature: 0.3 });
-    const resp = await fetch(`${baseUrl}/v1/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }, body, signal: AbortSignal.timeout(30000) });
+    const body = JSON.stringify({ model, system: systemMsg?.content || '', messages: userMsgs, max_tokens: 4096, temperature: 0.3, stream: true });
+    const resp = await fetch(`${baseUrl}/v1/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }, body, signal });
     if (!resp.ok) throw new Error(`Anthropic API 请求失败 (${resp.status})`);
-    const data = await resp.json();
-    return data.content?.[0]?.text || '';
+    let full = '';
+    await streamSSE(resp, (json) => {
+      if (json.type === 'content_block_delta' && json.delta?.type === 'text_delta' && typeof json.delta.text === 'string') {
+        full += json.delta.text; onDelta(json.delta.text);
+      }
+    }, signal);
+    return full;
   }
 
   if (provider === 'gemini') {
     const contents = messages.filter(m => m.role !== 'system').map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }));
     const body = JSON.stringify({ contents });
-    const resp = await fetch(`${baseUrl}/models/${model}:generateContent?key=${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal: AbortSignal.timeout(30000) });
+    const resp = await fetch(`${baseUrl}/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body, signal });
     if (!resp.ok) throw new Error(`Gemini API 请求失败 (${resp.status})`);
-    const data = await resp.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    let full = '';
+    await streamSSE(resp, (json) => {
+      const parts = json.candidates?.[0]?.content?.parts;
+      if (Array.isArray(parts)) {
+        for (const p of parts) {
+          if (p && typeof p.text === 'string' && p.text.length > 0) { full += p.text; onDelta(p.text); }
+        }
+      }
+    }, signal);
+    return full;
   }
 
   throw new Error('未知的 AI 提供商');
 }
 
-ipcMain.handle('ai:chat', async (_event, { messages, currentCode }) => {
+ipcMain.handle('ai:chat', async (event, { messages, currentCode }) => {
   const config = loadAIConfig();
   if (!config) throw new Error('请先配置 AI 模型');
   const sysPrompt = SYSTEM_PROMPT.replace('{currentCode}', currentCode || '(空)');
   const fullMessages = [{ role: 'system', content: sysPrompt }, ...messages];
-  return await callAI(config, fullMessages);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error('AI 请求超时')), 120000);
+  try {
+    let full = '';
+    await streamAI(config, fullMessages, (delta) => {
+      full += delta;
+      event.sender.send('ai:chat:delta', { delta });
+    }, controller.signal);
+    event.sender.send('ai:chat:done', { content: full });
+    return { ok: true };
+  } catch (err) {
+    const msg = err.message || String(err);
+    event.sender.send('ai:chat:error', { error: msg });
+    return { ok: false, error: msg };
+  } finally {
+    clearTimeout(timeout);
+  }
+});
+
+// ========== AI Chat History (cache/ai-chat-history.json) ==========
+// 与 recent-files.json / ai-config.json 同目录：dev 在项目根 cache/，打包在 exe 同目录 cache/
+function getAIChatHistoryPath() {
+  const dir = getCacheDir();
+  if (!fsSync.existsSync(dir)) fsSync.mkdirSync(dir, { recursive: true });
+  return path.join(dir, 'ai-chat-history.json');
+}
+
+function loadAIChatHistory() {
+  try {
+    const p = getAIChatHistoryPath();
+    if (fsSync.existsSync(p)) {
+      const data = JSON.parse(fsSync.readFileSync(p, 'utf8'));
+      if (Array.isArray(data)) return data;
+    }
+  } catch {}
+  return [];
+}
+
+function saveAIChatHistory(messages) {
+  try {
+    fsSync.writeFileSync(getAIChatHistoryPath(), JSON.stringify(messages, null, 2), 'utf8');
+    return true;
+  } catch { return false; }
+}
+
+ipcMain.handle('ai:history:load', () => {
+  const history = loadAIChatHistory();
+  console.log(`[ai-history] load -> ${history.length} messages from ${getAIChatHistoryPath()}`);
+  return history;
+});
+ipcMain.handle('ai:history:save', (_event, messages) => {
+  const ok = saveAIChatHistory(messages);
+  console.log(`[ai-history] save ${Array.isArray(messages) ? messages.length : '?'} messages -> ${ok ? 'ok' : 'FAILED'} at ${getAIChatHistoryPath()}`);
+  return ok;
 });
 
 // ========== App Quit ==========

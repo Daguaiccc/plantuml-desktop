@@ -411,6 +411,18 @@ body {
   padding: 12px 20px; border-top: 1px solid var(--border-color);
 }
 
+.config-test-result {
+  margin-right: auto;
+  font-size: 12px;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-test-result.ok { color: #2E7D32; }
+.config-test-result.fail { color: #C62828; }
+
 .config-btn {
   padding: 7px 18px; border: none; border-radius: var(--radius-sm);
   font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.15s ease;
@@ -678,6 +690,14 @@ body {
   line-height: 1.4;
 }
 
+.error-msg.clickable {
+  cursor: pointer;
+}
+
+.error-msg.clickable:hover {
+  background: #FDEAE2;
+}
+
 /* ========== 编辑器工具栏 ========= */
 .editor-toolbar {
   display: flex;
@@ -867,6 +887,22 @@ body {
   align-items: center;
   justify-content: center;
   opacity: 0.6;
+}
+
+/* 渲染中浮层 */
+.render-loading {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 8px 16px;
+  border-radius: 10px;
+  background: rgba(74, 55, 40, 0.75);
+  color: #FFFBF5;
+  font-size: 13px;
+  pointer-events: none;
+  z-index: 5;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
 /* ========== 欢迎弹窗 ========= */

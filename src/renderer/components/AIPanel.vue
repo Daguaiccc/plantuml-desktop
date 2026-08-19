@@ -23,7 +23,7 @@
       <div v-for="(msg, i) in messages" :key="i" class="ai-message" :class="msg.role">
         <div class="ai-msg-role">{{ msg.role === 'user' ? '你' : 'AI' }}</div>
         <div class="ai-msg-content">
-          <template v-if="msg.role === 'assistant' && hasCodeBlock(msg.content)">
+          <template v-if="msg.role === 'assistant' && hasCodeBlock(msg.content) && !isStreaming(msg)">
             <div v-if="extractText(msg.content)" class="ai-msg-text">{{ extractText(msg.content) }}</div>
             <div class="ai-code-actions">
               <button class="ai-insert-btn" @click="insertCode(msg.content)">插入到编辑器</button>
@@ -58,7 +58,7 @@
 </template>
 
 <script setup>
-import { ref, nextTick, watch, onMounted } from 'vue';
+import { ref, nextTick, watch, onMounted, onBeforeUnmount } from 'vue';
 
 const props = defineProps({ show: Boolean, currentCode: { type: String, default: '' } });
 const emit = defineEmits(['close', 'insertCode', 'openConfig']);
@@ -106,6 +106,31 @@ async function loadConfig() {
   if (window.api?.ai) { try { config.value = await window.api.ai.loadConfig(); } catch {} }
 }
 
+// ===== 对话历史持久化（cache/ai-chat-history.json，与最近文件同目录）=====
+// 流式进行中不把半截占位写入历史；完成后的 done 回调会再触发保存
+async function saveHistory() {
+  if (loading.value && messages.value.length > 0 && messages.value[messages.value.length - 1].role === 'assistant') return;
+  if (!window.api?.ai) return;
+  try {
+    // IPC 的 structured clone 无法克隆 Vue reactive proxy，必须先转普通 JSON 对象
+    const plain = messages.value.map((m) => ({ role: m.role, content: m.content }));
+    const r = await window.api.ai.saveHistory(plain);
+    console.log('[ai-history] save result:', JSON.stringify(r), 'count:', plain.length);
+  } catch (e) { console.error('[ai-history] save error:', e); }
+}
+watch(messages, () => { saveHistory(); }, { deep: true });
+// 组件卸载（关闭面板）前兜底保存，避免最后一次消息未落盘
+onBeforeUnmount(() => { saveHistory(); });
+
+async function loadHistory() {
+  if (!window.api?.ai) { console.log('[ai-history] load skipped (no api)'); return; }
+  try {
+    const history = await window.api.ai.loadHistory();
+    console.log('[ai-history] load result count:', Array.isArray(history) ? history.length : history);
+    if (Array.isArray(history) && history.length > 0) messages.value = history;
+  } catch (e) { console.error('[ai-history] load error:', e); }
+}
+
 watch(() => props.show, (v) => { if (v) loadConfig(); });
 
 function onInputKeydown(e) {
@@ -123,25 +148,57 @@ async function send() {
   input.value = '';
   error.value = '';
   messages.value.push({ role: 'user', content: text });
+  // 预置 assistant 占位消息，流式增量填充
+  messages.value.push({ role: 'assistant', content: '' });
+  const idx = messages.value.length - 1;
   loading.value = true;
   scrollDown();
 
+  const history = messages.value
+    .slice(0, idx)
+    .filter(m => m.content)
+    .map(m => ({ role: m.role, content: m.content }));
+
+  const off = window.api.ai.chatEvents({
+    delta: ({ delta }) => {
+      messages.value[idx].content += delta;
+      scrollDown();
+    },
+    done: ({ content }) => {
+      messages.value[idx].content = content || 'AI 未返回内容';
+      loading.value = false;
+      scrollDown();
+    },
+    error: ({ error: msg }) => {
+      if (messages.value[idx].content === '') messages.value.splice(idx, 1);
+      else messages.value[idx].content += '\n\n[请求失败: ' + msg + ']';
+      error.value = '请求失败: ' + msg;
+      loading.value = false;
+      scrollDown();
+    }
+  });
   try {
-    const reply = await window.api.ai.chat(
-      messages.value.map(m => ({ role: m.role, content: m.content })),
-      props.currentCode
-    );
-    messages.value.push({ role: 'assistant', content: reply || 'AI 未返回内容' });
+    await window.api.ai.chatStream(history, props.currentCode);
   } catch (err) {
+    if (messages.value[idx]) {
+      if (messages.value[idx].content === '') messages.value.splice(idx, 1);
+      else messages.value[idx].content += '\n\n[请求失败: ' + (err.message || '未知错误') + ']';
+    }
     error.value = '请求失败: ' + (err.message || '未知错误');
-  } finally {
     loading.value = false;
     scrollDown();
+  } finally {
+    off();
   }
 }
 
-function insertCode(text) { emit('insertCode', extractCode(text)); }
-function clearChat() { messages.value = []; error.value = ''; }
+// 流式进行中的最后一条 assistant 消息：始终以纯文本显示，完成后才切换代码块视图
+function isStreaming(msg) {
+  return loading.value && messages.value.length > 0 && messages.value[messages.value.length - 1] === msg;
+}
 
-onMounted(loadConfig);
+function insertCode(text) { emit('insertCode', extractCode(text)); }
+function clearChat() { messages.value = []; error.value = ''; saveHistory(); }
+
+onMounted(() => { loadConfig(); loadHistory(); });
 </script>

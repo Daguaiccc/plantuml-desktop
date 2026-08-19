@@ -2,7 +2,7 @@
 
 > 由 AI（Claude Code）辅助生成的离线 PlantUML 桌面编辑器
 
-一个基于 Electron + Vue 3 + Monaco Editor 的 PlantUML 图表编辑器，支持实时预览、多标签页、导出多种格式，完全离线运行。
+一个基于 Electron + Vue 3 + Monaco Editor 的 PlantUML 图表编辑器，支持实时预览、多标签页、导出多种格式、AI 绘图助手（流式对话），完全离线运行。
 
 ## 技术栈
 
@@ -29,6 +29,13 @@
 - 分割线拖拽 — 自由调整编辑区与预览区比例
 - 右键菜单 — 标签页右键：关闭、关闭其他、关闭所有、复制路径
 - Shift+点击 — 快速关闭标签页
+- AI 绘图助手 — 流式对话生成 PlantUML 代码，支持 Anthropic / Gemini / OpenAI 兼容 / Ollama
+- AI 配置测试 — 配置弹窗内一键测试连接，API Key 使用系统级安全存储（safeStorage）加密
+- 对话历史 — 聊天记录保存到 `cache/ai-chat-history.json`，重启不丢失
+- 代码补全 — PlantUML 关键字与 `!theme` 主题名自动补全
+- 语法诊断 — `@startuml`/`@enduml` 配对实时检查，点击错误提示直接跳转到编辑器错误行
+- 渲染状态 — 渲染大图时显示进度提示，渲染请求串行化并自动恢复异常管道
+- 缩放保持 — 手动缩放/平移后编辑代码不再跳回全图
 
 ## 下载
 
@@ -79,13 +86,16 @@ plantuml-desktop/
 │       ├── main.js          # Vue 入口
 │       ├── index.html       # HTML 模板
 │       ├── components/
-│       │   ├── PlantUmlEditor.vue  # Monaco 编辑器封装
-│       │   └── SyntaxCheatsheet.vue # 语法速查面板
+│       │   ├── PlantUmlEditor.vue    # Monaco 编辑器封装（高亮/补全/诊断）
+│       │   ├── SyntaxCheatsheet.vue  # 语法速查面板
+│       │   ├── AIPanel.vue           # AI 对话面板（流式输出）
+│       │   └── AIConfigPanel.vue     # AI 提供商配置弹窗（含测试连接）
 │       └── examples/
 │           └── plantumlExamples.js # 示例模板库
 ├── bin/
 │   └── plantuml.jar         # PlantUML 引擎（手动下载）
 ├── jre/                     # Java 运行时（手动下载）
+├── cache/                   # 运行时数据：最近文件、AI 配置、聊天历史
 ├── package.json
 ├── vite.config.js
 └── README.md

@@ -152,6 +152,7 @@
           @mousedown="startDrag"
           @wheel.prevent="handleWheelZoom"
         >
+          <div v-if="isRendering" class="render-loading">渲染中…</div>
           <div v-if="svg" class="svg-content"
             :style="{ transform: `translate(${offsetX}px, ${offsetY}px) scale(${zoomLevel})`, transformOrigin: '0 0' }"
             v-html="svg"
@@ -159,7 +160,9 @@
           <div v-else class="preview-placeholder">图表预览将显示在这里</div>
         </div>
 
-        <div v-if="error" class="error-msg">{{ error }}</div>
+        <div v-if="error" class="error-msg" :class="{ clickable: errorLine }"
+          :title="errorLine ? '点击定位到第 ' + errorLine + ' 行' : ''"
+          @click="jumpToErrorLine">{{ error }}</div>
 
         <div class="status-bar">
           <span v-if="svgSize">{{ svgSize.width }} &times; {{ svgSize.height }} px</span>
@@ -214,7 +217,12 @@ const tabs = ref([]);
 const activeTabId = ref(null);
 
 const toastMessage = ref('');
-function showToast(msg) { toastMessage.value = msg; setTimeout(() => { toastMessage.value = ''; }, 2000); }
+let toastTimer = null;
+function showToast(msg, duration = 2000) {
+  toastMessage.value = msg;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toastMessage.value = ''; }, duration);
+}
 
 function createTab(code, fileName, filePath) {
   if (tabs.value.length >= 10) {
@@ -298,6 +306,8 @@ const unsavedDialogMessage = computed(() => {
 // ========== SVG / Zoom / Pan State ==========
 const svg = ref('');
 const error = ref('');
+const isRendering = ref(false);
+const errorLine = ref(null);
 const editorRef = ref(null);
 const zoomLevel = ref(1);
 const offsetX = ref(0);
@@ -350,32 +360,53 @@ const isBusy = computed(() => isExporting.value || isExportingPng.value || isExp
 const canExport = computed(() => (activeTab.value?.code || '').trim().length > 0);
 
 // ========== Render ==========
+// 渲染请求版本号：丢弃过期响应，防止旧渲染结果覆盖新预览
+let renderSeq = 0;
 const render = async () => {
+  const seq = ++renderSeq;
+  isRendering.value = true;
   error.value = '';
   const startTime = performance.now();
   try {
     const code = activeTab.value?.code || '';
     const trimmed = code.trim();
     if (!trimmed.includes('@startuml') || !trimmed.includes('@enduml')) {
+      if (seq !== renderSeq) return;
+      isRendering.value = false;
+      errorLine.value = null;
       error.value = 'PlantUML 代码必须包含 @startuml 和 @enduml';
       renderTime.value = null;
       return;
     }
     const result = await window.api.plantuml.render(code);
+    if (seq !== renderSeq) return; // 过期响应丢弃（isRendering 由最新请求管理）
+    isRendering.value = false;
     svg.value = result.svg;
     renderTime.value = Math.round(performance.now() - startTime);
     if (result.errorLine) {
+      errorLine.value = result.errorLine;
       error.value = result.errorMessage || '语法错误';
       editorRef.value?.highlightErrorLine(result.errorLine);
     } else {
+      errorLine.value = null;
       error.value = '';
       editorRef.value?.clearErrorHighlights();
     }
   } catch (err) {
+    if (seq !== renderSeq) return;
+    isRendering.value = false;
+    errorLine.value = null;
     error.value = '渲染失败: ' + (err.message || String(err));
     renderTime.value = null;
   }
 };
+
+// 点击错误提示：重新定位并聚焦编辑器中的错误行
+function jumpToErrorLine() {
+  if (!errorLine.value || !editorRef.value) return;
+  editorRef.value.highlightErrorLine(errorLine.value);
+  editorRef.value.focusEditor();
+}
 
 const debouncedRender = _debounce(render, 500);
 watch(editorCode, debouncedRender, { immediate: true });
@@ -384,11 +415,10 @@ const debouncedSyncTheme = _debounce(syncThemeFromCode, 300);
 watch(editorCode, debouncedSyncTheme);
 
 watch(showAIPanel, () => {
-  nextTick(() => { if (svg.value) fitToContainer(); });
+  refreshViewport();
 });
 watch(svg, () => {
   nextTick(() => {
-    fitToContainer();
     if (svgWrapper.value) {
       const svgEl = svgWrapper.value.querySelector('svg');
       if (svgEl) {
@@ -397,6 +427,7 @@ watch(svg, () => {
         svgSize.value = w > 0 ? { width: Math.round(w), height: Math.round(h) } : null;
       } else { svgSize.value = null; }
     }
+    refreshViewport();
   });
 });
 
@@ -415,14 +446,41 @@ const fitToContainer = () => {
   offsetY.value = (cr.height - sh * scale) / 2;
 };
 
+// 用户手动调整过视图（缩放/平移/缩放输入）后，新 SVG 不再强制自动适配，
+// 而是保持当前缩放级别并居中，避免看局部细节时视角跳回全图
+let userViewAdjusted = false;
+
+function keepViewOnNewSvg() {
+  if (!svg.value || !svgWrapper.value) return;
+  const svgEl = svgWrapper.value.querySelector('svg');
+  if (!svgEl) return;
+  const sw = parseFloat(svgEl.getAttribute('width')) || 0;
+  const sh = parseFloat(svgEl.getAttribute('height')) || 0;
+  if (sw <= 0 || sh <= 0) return;
+  const cr = svgWrapper.value.getBoundingClientRect();
+  const scale = Math.min(Math.max(zoomLevel.value, MIN_ZOOM), MAX_ZOOM);
+  zoomLevel.value = scale;
+  offsetX.value = (cr.width - sw * scale) / 2;
+  offsetY.value = (cr.height - sh * scale) / 2;
+}
+
+function refreshViewport() {
+  nextTick(() => {
+    if (!svg.value || !svgWrapper.value) return;
+    if (userViewAdjusted) keepViewOnNewSvg();
+    else fitToContainer();
+  });
+}
+
 onMounted(() => {
-  const hr = _debounce(() => { if (svg.value) fitToContainer(); }, 200);
+  const hr = _debounce(() => { if (svg.value) refreshViewport(); }, 200);
   window.addEventListener('resize', hr);
   onUnmounted(() => { window.removeEventListener('resize', hr); });
 });
 
 // ========== Zoom & Pan ==========
 function applyZoom(factor, cx, cy) {
+  userViewAdjusted = true;
   const nz = Math.min(Math.max(zoomLevel.value * factor, MIN_ZOOM), MAX_ZOOM);
   if (Math.abs(nz - zoomLevel.value) < 0.001) return;
   if (cx !== undefined && cy !== undefined && svgWrapper.value) {
@@ -439,6 +497,7 @@ function zoomOut() { applyZoom(1 / 1.2); }
 function handleWheelZoom(e) { applyZoom(e.deltaY > 0 ? 0.9 : 1.1, e.clientX, e.clientY); }
 function startDrag(e) {
   if (e.button !== 0) return;
+  userViewAdjusted = true;
   isPanning = true;
   panStartX = e.clientX - offsetX.value;
   panStartY = e.clientY - offsetY.value;
@@ -454,10 +513,12 @@ function stopDrag() { isPanning = false; if (svgWrapper.value) svgWrapper.value.
 document.addEventListener('mousemove', onDragMove);
 document.addEventListener('mouseup', stopDrag);
 function resetView() {
+  userViewAdjusted = false;
   if (svg.value) fitToContainer();
   else { zoomLevel.value = 1; offsetX.value = 0; offsetY.value = 0; }
 }
 function handleZoomInput(e) {
+  userViewAdjusted = true;
   let v = parseFloat(e.target.value);
   if (isNaN(v)) v = 100;
   v = Math.min(Math.max(v, 10), 300);
@@ -647,7 +708,7 @@ function createNewDiagram() {
 }
 
 async function openExistingDiagram() {
-  if (!window.api) { alert('此功能仅在 Electron 桌面应用中可用'); return; }
+  if (!window.api) { showToast('此功能仅在 Electron 桌面应用中可用'); return; }
   try {
     const result = await window.api.file.openFile();
     if (result.canceled) return;
@@ -664,7 +725,7 @@ async function openExistingDiagram() {
       createTab(result.content, getBaseName(result.filePath), result.filePath);
     }
     recentFiles.value = await window.api.file.recentFiles.load();
-  } catch (err) { alert('打开文件时出错: ' + (err.message || '未知错误')); }
+  } catch (err) { showToast('打开文件时出错: ' + (err.message || '未知错误'), 4000); }
 }
 
 async function openRecentFile(filePath) {
@@ -677,7 +738,7 @@ async function openRecentFile(filePath) {
       createTab(result.content, getBaseName(filePath), filePath);
       recentFiles.value = await window.api.file.recentFiles.add(filePath);
     }
-  } catch (err) { alert('无法打开文件: ' + (err.message || '未知错误')); }
+  } catch (err) { showToast('无法打开文件: ' + (err.message || '未知错误'), 4000); }
 }
 
 async function saveTab(tab) {
@@ -695,7 +756,7 @@ async function saveTab(tab) {
       tab.savedContent = tab.code;
       window.api.file.recentFiles.add(tab.filePath);
       return true;
-    } else { alert('保存失败: ' + result.error); return false; }
+    } else { showToast('保存失败: ' + result.error, 4000); return false; }
   } else {
     const result = await window.api.file.saveFileAs(tab.code);
     if (result.success && result.filePath) {
@@ -762,22 +823,22 @@ async function doExport(format) {
     isExporting.value = true;
     try {
       const r = await window.api.plantuml.exportSvg({ code: activeTab.value.code });
-      if (!r.success && !r.canceled) alert('导出失败: ' + r.error);
-    } catch (err) { alert('导出失败: ' + (err.message || '未知错误')); }
+      if (!r.success && !r.canceled) showToast('导出失败: ' + r.error, 4000);
+    } catch (err) { showToast('导出失败: ' + (err.message || '未知错误'), 4000); }
     finally { isExporting.value = false; }
   } else if (format === 'png' && !isExportingPng.value) {
     isExportingPng.value = true;
     try {
       const r = await window.api.plantuml.exportPng({ code: activeTab.value.code });
-      if (!r.success && !r.canceled) alert('导出失败: ' + r.error);
-    } catch (err) { alert('PNG 导出失败: ' + (err.message || '未知错误')); }
+      if (!r.success && !r.canceled) showToast('导出失败: ' + r.error, 4000);
+    } catch (err) { showToast('PNG 导出失败: ' + (err.message || '未知错误'), 4000); }
     finally { isExportingPng.value = false; }
   } else if (format === 'pdf' && !isExportingPdf.value) {
     isExportingPdf.value = true;
     try {
       const r = await window.api.plantuml.exportPdf({ code: activeTab.value.code });
-      if (!r.success && !r.canceled) alert('导出失败: ' + r.error);
-    } catch (err) { alert('PDF 导出失败: ' + (err.message || '未知错误')); }
+      if (!r.success && !r.canceled) showToast('导出失败: ' + r.error, 4000);
+    } catch (err) { showToast('PDF 导出失败: ' + (err.message || '未知错误'), 4000); }
     finally { isExportingPdf.value = false; }
   }
 }

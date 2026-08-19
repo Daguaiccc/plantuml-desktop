@@ -15,6 +15,27 @@ const container = ref(null);
 let editor = null;
 let decorations = [];
 
+// ===== PlantUML 编辑增强 =====
+const PLANTUML_KEYWORDS = [
+  '@startuml', '@enduml', '@startmindmap', '@endmindmap',
+  'participant', 'actor', 'usecase', 'class', 'interface', 'abstract', 'enum',
+  'entity', 'package', 'rectangle', 'component', 'artifact', 'folder', 'frame',
+  'node', 'cloud', 'storage', 'database', 'agent', 'boundary', 'control',
+  'state', 'note', 'title', 'legend', 'skinparam', 'activate', 'deactivate',
+  'alt', 'else', 'end', 'loop', 'opt', 'par', 'group', 'break', 'critical',
+  'detach', 'destroy', 'return', 'stop', 'repeat', 'while', 'fork', 'join',
+  'if', 'then', 'endif', 'autonumber', 'header', 'footer', 'caption',
+  'left', 'right', 'center', 'up', 'down', 'hide', 'show', 'namespace',
+  'allow_mixing', 'scale', 'zoom', 'sprite', 'stereotype', 'methods', 'fields',
+  'properties', 'static', 'external', 'collections', 'map'
+];
+
+// 与 App.vue PLANTUML_THEMES 对应（不含空值"无主题"）
+const PLANTUML_THEMES = [
+  'blueprint', 'cerulean', 'crt-amber', 'crt-green', 'hacker', 'materia',
+  'mimeograph', 'plain', 'sketchy-outline', 'spacelab', 'united'
+];
+
 onMounted(async () => {
   await nextTick();
 
@@ -27,7 +48,9 @@ onMounted(async () => {
   monaco.languages.setMonarchTokensProvider('plantuml', {
     tokenizer: {
       root: [
-        [/\b(activate|deactivate|participant|actor|usecase|class|interface|package|note|title|skinparam|state|database|[*])\b/, 'keyword'],
+        [/(?:[@]start(uml|mindmap|wbs))|(?:[@]end(uml|mindmap|wbs))/, 'keyword'],
+        [/!theme\s+\S+/, 'keyword.other'],
+        [new RegExp(`\\b(${PLANTUML_KEYWORDS.filter((k) => !k.startsWith('@')).join('|')})\\b`), 'keyword'],
         [/'.*$/, 'comment'],
         [/"/, 'string', '@string'],
         [/[a-zA-Z][\w]*/, 'identifier']
@@ -37,6 +60,47 @@ onMounted(async () => {
         [/"/, 'string', '@pop'],
         [/\\./, 'string.escape']
       ]
+    }
+  });
+
+  // 自动补全：普通输入给关键词；!theme 后给主题名
+  monaco.languages.registerCompletionItemProvider('plantuml', {
+    triggerCharacters: ['@', '!', ':'],
+    provideCompletionItems(model, position) {
+      const word = model.getWordUntilPosition(position);
+      const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
+      const linePrefix = model.getLineContent(position.lineNumber).slice(0, position.column - 1);
+
+      // 在 !theme 后：只建议主题名
+      const themeMatch = linePrefix.match(/!theme\s+([\w-]*)$/i);
+      if (themeMatch) {
+        return {
+          suggestions: PLANTUML_THEMES.map((t) => ({
+            label: t,
+            kind: monaco.languages.CompletionItemKind.Value,
+            insertText: t,
+            range,
+            sortText: '0' + t
+          }))
+        };
+      }
+
+      // 通用关键词 + !theme 指令
+      const suggestions = PLANTUML_KEYWORDS.map((kw) => ({
+        label: kw,
+        kind: monaco.languages.CompletionItemKind.Keyword,
+        insertText: kw,
+        range,
+        sortText: kw.startsWith('@') ? '0' + kw : '1' + kw
+      }));
+      suggestions.push({
+        label: '!theme',
+        kind: monaco.languages.CompletionItemKind.Snippet,
+        insertText: '!theme ',
+        range,
+        sortText: '2'
+      });
+      return { suggestions };
     }
   });
 
@@ -55,6 +119,7 @@ onMounted(async () => {
 
   editor.onDidChangeModelContent(() => {
     emit('update:modelValue', editor.getValue());
+    updateDiagnostics();
   });
 
   editor.onDidChangeCursorPosition((e) => {
@@ -94,7 +159,32 @@ function clearErrorHighlights() {
   }
 }
 
-defineExpose({ highlightErrorLine, clearErrorHighlights });
+function focusEditor() {
+  if (editor) editor.focus();
+}
+
+// 基础诊断：@startuml / @enduml 配对检查（详细语法错误行由渲染结果高亮）
+function updateDiagnostics() {
+  if (!editor) return;
+  const model = editor.getModel();
+  const text = model.getValue();
+  const starts = [...text.matchAll(/@startuml/gi)];
+  const ends = [...text.matchAll(/@enduml/gi)];
+  const markers = [];
+  if (starts.length !== ends.length) {
+    const lastLine = (arr) => model.getLineNumberAtOffset(arr[arr.length - 1].index);
+    if (starts.length > ends.length) {
+      const l = lastLine(starts);
+      markers.push({ severity: monaco.MarkerSeverity.Error, message: '缺少 @enduml', startLineNumber: l, startColumn: 1, endLineNumber: l, endColumn: 1 });
+    } else {
+      const l = lastLine(ends);
+      markers.push({ severity: monaco.MarkerSeverity.Error, message: '缺少 @startuml', startLineNumber: l, startColumn: 1, endLineNumber: l, endColumn: 1 });
+    }
+  }
+  monaco.editor.setModelMarkers(model, 'plantuml', markers);
+}
+
+defineExpose({ highlightErrorLine, clearErrorHighlights, focusEditor });
 
 onUnmounted(() => {
   if (editor) { editor.dispose(); }

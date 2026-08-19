@@ -26,6 +26,8 @@
         </div>
       </div>
       <div class="config-footer">
+        <span v-if="testResult" class="config-test-result" :class="testResult.ok ? 'ok' : 'fail'">{{ testResult.text }}</span>
+        <button class="config-btn secondary" @click="testConnection" :disabled="testing">{{ testing ? '测试中...' : '测试连接' }}</button>
         <button class="config-btn secondary" @click="$emit('close')">取消</button>
         <button class="config-btn primary" @click="saveConfig">保存</button>
       </div>
@@ -108,6 +110,34 @@ async function saveConfig() {
   }
   emit('saved', config);
   emit('close');
+}
+
+const testing = ref(false);
+const testResult = ref(null);
+
+async function testConnection() {
+  if (!window.api?.ai || testing.value) return;
+  testing.value = true;
+  testResult.value = null;
+  try {
+    const config = {
+      provider: form.provider,
+      apiKey: form.apiKey,
+      baseUrl: form.baseUrl || defaultBaseUrl.value,
+      model: form.model || defaultModel.value
+    };
+    const r = await window.api.ai.testConnection(config);
+    if (r.ok) {
+      const preview = (r.preview || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+      testResult.value = { ok: true, text: '连接成功 ✓' + (preview ? '：' + preview : '') };
+    } else {
+      testResult.value = { ok: false, text: '连接失败: ' + (r.error || '未知错误') };
+    }
+  } catch (err) {
+    testResult.value = { ok: false, text: '连接失败: ' + (err.message || '未知错误') };
+  } finally {
+    testing.value = false;
+  }
 }
 
 onMounted(loadConfig);
