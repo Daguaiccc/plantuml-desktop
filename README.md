@@ -1,6 +1,6 @@
 # PlantUML Desktop Editor
 
-> 由 AI（Claude Code）辅助生成的离线 PlantUML 桌面编辑器
+> 由 AI（DeepSeek Harness）生成的离线 PlantUML 桌面编辑器
 
 一个基于 Electron + Vue 3 + Monaco Editor 的 PlantUML 图表编辑器，支持实时预览、多标签页、导出多种格式、AI 绘图助手（流式对话），完全离线运行。
 
@@ -104,7 +104,3 @@ plantuml-desktop/
 ## License
 
 GPL-3.0
-
-## 致谢
-
-本项目由 [Claude Code](https://claude.ai/code)（Anthropic）辅助生成，展示了 AI 驱动的端到端桌面应用开发能力。
